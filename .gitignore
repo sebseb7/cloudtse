@@ -1,0 +1,5 @@
+node_modules/
+data/
+sources/
+c/cloudtse
+c/src/*.o
