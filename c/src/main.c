@@ -3,6 +3,7 @@
 #include "http.h"
 #include "network.h"
 #include "store.h"
+#include "tse_worm.h"
 
 #include <signal.h>
 #include <stdio.h>
@@ -53,6 +54,16 @@ int main(void) {
     printf("  EAS-Code:   %s\n", g_config.eas_code);
     printf("  TSE serial: %s\n", g_config.tse_serial);
     printf("  Database:   %s\n", g_config.db_path);
+    if (g_config.tse_mode == TSE_MODE_HARDWARE) {
+        printf("  TSE mode:   hardware (%s)\n", g_config.tse_device);
+        if (tse_worm_is_active()) {
+            printf("  WormAPI:    %s\n", g_config.worm_lib);
+        } else {
+            printf("  WormAPI:    not loaded (simulator fallback)\n");
+        }
+    } else {
+        printf("  TSE mode:   simulator\n");
+    }
     printf("\n");
     printf("    IP           = one of the addresses above\n");
     printf("    Port         = 20001\n");
@@ -61,11 +72,13 @@ int main(void) {
     printf("\n");
 
     if (!g_running) {
+        store_shutdown();
         db_close();
         return 0;
     }
 
     int rc = http_serve(g_config.host, g_config.port, &g_running);
+    store_shutdown();
     db_close();
     return rc == 0 ? 0 : 1;
 }

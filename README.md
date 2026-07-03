@@ -9,8 +9,24 @@ Development-only **BSI TR-03153 compatible cloud TSE** for POS integration testi
 ```bash
 sudo apt install libsqlite3-dev   # once
 make -C c
-./c/cloudtse
 ```
+
+**Simulator** (no hardware — default when running the binary directly):
+
+```bash
+CLOUDTSE_TSE_MODE=sim ./c/cloudtse
+# or
+./start.sh sim
+```
+
+**Hardware** (Swissbit TSE via WormAPI — default for `start.sh`):
+
+```bash
+# Place the linux64 libWormAPI.so from the Swissbit SDK at libWormAPI/libWormAPI.so
+sudo ./start.sh
+```
+
+`start.sh` sets `LD_LIBRARY_PATH`, picks up `libWormAPI/libWormAPI.so`, and tries to mount the TSE partition at `/mnt/tse`. If mount init fails, the C code falls back to block I/O on `CLOUDTSE_TSE_DEVICE` (default `/dev/sda`).
 
 ### Node.js
 
@@ -49,6 +65,17 @@ Receipt **TSE** line uses `/tssdetails` field `serial` (cached by the client). *
 
 Response shapes are aligned with the reference client in `sources/`.
 
+## TSE modes
+
+| Mode | How to run | Signing |
+|------|------------|---------|
+| **sim** | `CLOUDTSE_TSE_MODE=sim` or `./start.sh sim` | Software simulator (fake serial, no TSE) |
+| **hardware** | `./start.sh` or `CLOUDTSE_TSE_MODE=hardware` | Real Swissbit TSE via WormAPI |
+
+In hardware mode, `/tssdetails` `serial` comes from the physical TSE when WormAPI loads successfully. If init fails, the server falls back to simulator signing and logs a warning.
+
+Hardware mode needs the **linux64** `libWormAPI.so`. Download from the [Swissbit TSE connector](https://www.mytivi.at/tseconnector/swissbit/nativelibs/linux64/libWormAPI.so) or the SDK, and place it at `libWormAPI/libWormAPI.so`.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -56,7 +83,13 @@ Response shapes are aligned with the reference client in `sources/`.
 | `CLOUDTSE_PORT` | `20001` | Listen port |
 | `CLOUDTSE_HOST` | `0.0.0.0` | Bind address |
 | `CLOUDTSE_EAS_CODE` | `12345678` | Expected EAS code (`*` = accept any) |
-| `CLOUDTSE_TSE_SERIAL` | 64-char hex | TSE serial returned as `serial` / `serialNumber` |
+| `CLOUDTSE_TSE_SERIAL` | 64-char hex | TSE serial in sim mode (`serial` / `serialNumber`) |
+| `CLOUDTSE_TSE_MODE` | `sim` (`hardware` via `start.sh`) | `sim`, `hardware`, `hw`, or `1` |
+| `CLOUDTSE_WORM_LIB` | `libWormAPI/libWormAPI.so` | Path to WormAPI shared library |
+| `CLOUDTSE_WORM_PATH` | auto | Mount path with `TSE_INFO.DAT` (e.g. `/mnt/tse`) |
+| `CLOUDTSE_TSE_DEVICE` | `/dev/sda` | Block device for direct TSE access |
+| `CLOUDTSE_WORM_ADMIN_PIN` | — | TSE admin PIN (if required) |
+| `CLOUDTSE_WORM_TIME_ADMIN_PIN` | — | TSE time-admin PIN (if required) |
 | `CLOUDTSE_PUBLIC_IP` | — | IP shown to clients when auto-detect fails |
 | `CLOUDTSE_DB_PATH` | `data/cloudtse.db` | SQLite persistence |
 | `CLOUDTSE_LOG` | `1` | Set `0` to disable request logging |
@@ -66,9 +99,11 @@ State (clients, transactions, counters, OAuth tokens) is stored in SQLite.
 ## Project layout
 
 ```
+start.sh            # launcher (hardware by default, `sim` subcommand)
+libWormAPI/         # place libWormAPI.so here for hardware mode
 c/                  # C implementation (same API + SQLite DB)
   Makefile
-  src/              # handlers, HTTP server, SQLite store
+  src/              # handlers, HTTP server, SQLite store, WormAPI integration
 src/                # Node.js implementation
   index.js          # entrypoint
   server.js         # routing
@@ -81,4 +116,4 @@ sources/            # decompiled reference client (not executed)
 
 ## License / disclaimer
 
-Simulator only. Do not use for production fiscal signing.
+Development only — not BSI-certified. Simulator mode is for integration testing without a TSE. Hardware mode talks to a real Swissbit TSE but this stack is still not certified for production fiscal signing.

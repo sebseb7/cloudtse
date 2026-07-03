@@ -10,7 +10,15 @@
 #define CLOUDTSE_DEFAULT_TSE_SERIAL \
     "A1B2C3D4E5F60718293A4B5C6D7E8F90123456789ABCDEF0123456789ABCDEF"
 #define CLOUDTSE_DEFAULT_FCC_VERSION "4.4.0-sim"
+#define CLOUDTSE_DEFAULT_FCC_VERSION_HW "4.4.0-hw"
 #define CLOUDTSE_DEFAULT_DB_PATH "data/cloudtse.db"
+#define CLOUDTSE_DEFAULT_TSE_DEVICE "/dev/sda"
+#define CLOUDTSE_DEFAULT_WORM_LIB "libWormAPI.so"
+
+typedef enum {
+    TSE_MODE_SIM = 0,
+    TSE_MODE_HARDWARE = 1,
+} tse_mode_t;
 
 typedef struct {
     char host[64];
@@ -21,6 +29,12 @@ typedef struct {
     char fcc_version[64];
     char db_path[512];
     bool log_requests;
+    tse_mode_t tse_mode;
+    char tse_device[256];
+    char worm_path[512];
+    char worm_lib[512];
+    char worm_admin_pin[128];
+    char worm_time_admin_pin[128];
 } cloudtse_config_t;
 
 extern cloudtse_config_t g_config;

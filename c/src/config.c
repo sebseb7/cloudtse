@@ -74,4 +74,34 @@ void config_load(void) {
         strncpy(g_config.public_ip, pub, sizeof(g_config.public_ip) - 1);
         util_trim(g_config.public_ip);
     }
+
+    const char *mode = env_or("CLOUDTSE_TSE_MODE", "sim");
+    if (strcmp(mode, "hardware") == 0 || strcmp(mode, "hw") == 0 || strcmp(mode, "1") == 0) {
+        g_config.tse_mode = TSE_MODE_HARDWARE;
+        util_strlcpy(g_config.fcc_version, CLOUDTSE_DEFAULT_FCC_VERSION_HW,
+                     sizeof(g_config.fcc_version));
+    } else {
+        g_config.tse_mode = TSE_MODE_SIM;
+    }
+
+    util_strlcpy(g_config.tse_device, env_or("CLOUDTSE_TSE_DEVICE", CLOUDTSE_DEFAULT_TSE_DEVICE),
+                 sizeof(g_config.tse_device));
+    g_config.worm_path[0] = '\0';
+    const char *worm_path = getenv("CLOUDTSE_WORM_PATH");
+    if (worm_path && worm_path[0]) {
+        util_strlcpy(g_config.worm_path, worm_path, sizeof(g_config.worm_path));
+    }
+    util_strlcpy(g_config.worm_lib, env_or("CLOUDTSE_WORM_LIB", CLOUDTSE_DEFAULT_WORM_LIB),
+                 sizeof(g_config.worm_lib));
+    g_config.worm_admin_pin[0] = '\0';
+    g_config.worm_time_admin_pin[0] = '\0';
+    const char *admin_pin = getenv("CLOUDTSE_WORM_ADMIN_PIN");
+    const char *time_pin = getenv("CLOUDTSE_WORM_TIME_ADMIN_PIN");
+    if (admin_pin && admin_pin[0]) {
+        util_strlcpy(g_config.worm_admin_pin, admin_pin, sizeof(g_config.worm_admin_pin));
+    }
+    if (time_pin && time_pin[0]) {
+        util_strlcpy(g_config.worm_time_admin_pin, time_pin,
+                     sizeof(g_config.worm_time_admin_pin));
+    }
 }

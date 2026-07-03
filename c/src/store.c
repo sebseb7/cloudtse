@@ -1,6 +1,7 @@
 #include "store.h"
 #include "config.h"
 #include "db.h"
+#include "tse_worm.h"
 #include "util.h"
 
 #include <sqlite3.h>
@@ -69,6 +70,11 @@ static void load_transaction_row(sqlite3_stmt *stmt, tse_transaction_t *tx) {
 
 void store_init(void) {
     char buf[128];
+    if (g_config.tse_mode == TSE_MODE_HARDWARE) {
+        if (tse_worm_init() != 0) {
+            fprintf(stderr, "cloudtse: hardware TSE init failed — falling back to simulator\n");
+        }
+    }
     if (db_get_setting("created_at", g_created_at, sizeof(g_created_at))) {
         return;
     }
@@ -77,7 +83,16 @@ void store_init(void) {
     (void)buf;
 }
 
+void store_shutdown(void) {
+    if (tse_worm_is_active()) {
+        tse_worm_shutdown();
+    }
+}
+
 int store_register_client(const char *serial_number) {
+    if (tse_worm_is_active()) {
+        return tse_worm_register_client(serial_number);
+    }
     char now[64];
     util_now_iso(now, sizeof(now));
     const char *sql =
@@ -99,6 +114,19 @@ int store_register_client(const char *serial_number) {
 int store_start_transaction(const char *client_id, const char *process_type,
                             const char *process_data, const char *external_tx_id,
                             tse_transaction_t *out) {
+    if (tse_worm_is_active()) {
+        char err[256];
+        if (tse_worm_start_transaction(client_id, process_type, process_data, out, err,
+                                     sizeof(err)) != 0) {
+            fprintf(stderr, "cloudtse: %s\n", err);
+            return -1;
+        }
+        if (external_tx_id && external_tx_id[0]) {
+            strncpy(out->external_transaction_id, external_tx_id,
+                    sizeof(out->external_transaction_id) - 1);
+        }
+        return 0;
+    }
     int64_t tx_num = db_increment_counter("transaction_counter");
     int64_t sig_counter = db_increment_counter("signature_counter");
     char now[64];
@@ -152,6 +180,11 @@ int store_finish_transaction(const char *client_id, int64_t transaction_number,
                              const char *process_type, const char *process_data,
                              tse_transaction_t *out, char *err_code, size_t err_code_len,
                              char *err_msg, size_t err_msg_len) {
+    if (tse_worm_is_active()) {
+        return tse_worm_finish_transaction(client_id, transaction_number, process_type,
+                                           process_data, out, err_code, err_code_len, err_msg,
+                                           err_msg_len);
+    }
     (void)client_id;
     const char *get_sql = "SELECT transaction_number, client_id, external_transaction_id, "
                           "process_type, process_data, state, time_start, time_end, "
@@ -221,6 +254,18 @@ int store_finish_transaction(const char *client_id, int64_t transaction_number,
 
 void store_info(tse_info_t *info) {
     memset(info, 0, sizeof(*info));
+    if (tse_worm_is_active()) {
+        tse_worm_fill_info(info);
+        util_strlcpy(info->fcc_version, g_config.fcc_version, sizeof(info->fcc_version));
+        util_strlcpy(info->db_path, g_config.tse_device, sizeof(info->db_path));
+        info->initialized = true;
+        if (g_created_at[0]) {
+            util_strlcpy(info->created_at, g_created_at, sizeof(info->created_at));
+        } else {
+            db_get_setting("created_at", info->created_at, sizeof(info->created_at));
+        }
+        return;
+    }
     char buf[128];
     db_get_setting("tse_serial", buf, sizeof(buf));
     store_normalize_serial(buf, info->serial_number, sizeof(info->serial_number));

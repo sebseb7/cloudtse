@@ -85,6 +85,42 @@ int util_random_base64(char *out, size_t outlen, size_t nbytes) {
     return 0;
 }
 
+int util_base64_encode(const uint8_t *in, size_t inlen, char *out, size_t outlen) {
+    size_t need = ((inlen + 2) / 3) * 4 + 1;
+    if (outlen < need) {
+        return -1;
+    }
+    size_t o = 0;
+    for (size_t i = 0; i < inlen; i += 3) {
+        uint32_t n = (uint32_t)in[i] << 16;
+        if (i + 1 < inlen) {
+            n |= (uint32_t)in[i + 1] << 8;
+        }
+        if (i + 2 < inlen) {
+            n |= in[i + 2];
+        }
+        out[o++] = b64_table[(n >> 18) & 63];
+        out[o++] = b64_table[(n >> 12) & 63];
+        out[o++] = (i + 1 < inlen) ? b64_table[(n >> 6) & 63] : '=';
+        out[o++] = (i + 2 < inlen) ? b64_table[n & 63] : '=';
+    }
+    out[o] = '\0';
+    return 0;
+}
+
+int util_bytes_to_hex(const uint8_t *in, size_t inlen, char *out, size_t outlen) {
+    if (outlen < inlen * 2 + 1) {
+        return -1;
+    }
+    static const char hex[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < inlen; i++) {
+        out[i * 2] = hex[(in[i] >> 4) & 0xF];
+        out[i * 2 + 1] = hex[in[i] & 0xF];
+    }
+    out[inlen * 2] = '\0';
+    return 0;
+}
+
 static int b64_val(int c) {
     if (c >= 'A' && c <= 'Z') {
         return c - 'A';

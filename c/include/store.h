@@ -31,6 +31,7 @@ typedef struct {
 } tse_info_t;
 
 void store_init(void);
+void store_shutdown(void);
 void store_normalize_serial(const char *value, char *out, size_t outlen);
 
 int store_register_client(const char *serial_number);

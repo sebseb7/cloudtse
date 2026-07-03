@@ -1,6 +1,7 @@
 #include "response.h"
 #include "config.h"
 #include "json.h"
+#include "tse_worm.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -32,11 +33,13 @@ int response_finish_transaction_json(const tse_transaction_t *tx, char *out, siz
 int response_tss_details_json(const char *serial, char *out, size_t outlen) {
     char norm[128];
     store_normalize_serial(serial, norm, sizeof(norm));
+    const char *pubkey = tse_worm_is_active() ? tse_worm_public_key_hex() : norm;
+    const char *cert = tse_worm_is_active() ? "HARDWARE" : "SIMULATOR";
     return snprintf(out, outlen,
                     "{\"serial\":\"%s\",\"timeFormat\":\"yyyy-MM-dd'T'HH:mm:ssX\","
                     "\"encoding\":\"UTF-8\",\"publicKey\":\"%s\","
-                    "\"algorithm\":\"ecdsa-plain-SHA256\",\"leafCertificate\":\"SIMULATOR\"}",
-                    norm, norm) < (int)outlen
+                    "\"algorithm\":\"ecdsa-plain-SHA256\",\"leafCertificate\":\"%s\"}",
+                    norm, pubkey, cert) < (int)outlen
                ? 0
                : -1;
 }

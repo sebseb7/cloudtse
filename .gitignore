@@ -3,3 +3,4 @@ data/
 sources/
 c/cloudtse
 c/src/*.o
+libWormAPI/libWormAPI.so
