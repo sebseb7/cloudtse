@@ -23,6 +23,7 @@ typedef struct {
     char method[16];
     char path[HTTP_MAX_PATH];
     char query[512];
+    int http_minor;
     http_header_t headers[HTTP_MAX_HEADERS];
     int header_count;
     char body[HTTP_MAX_BODY];
@@ -40,7 +41,7 @@ int http_serve(const char *host, uint16_t port, volatile sig_atomic_t *running);
 void http_shutdown(void);
 int http_parse_request(const char *raw, size_t raw_len, http_request_t *req);
 const char *http_get_header(const http_request_t *req, const char *name);
-void http_send_response(int client_fd, const http_response_t *res);
+void http_send_response(int client_fd, const http_response_t *res, int keep_alive);
 void http_send_json(int client_fd, int status, const char *json);
 void http_normalize_path(const char *url_path, char *out, size_t outlen);
 int http_parse_basic_auth(const http_request_t *req, char *client_id, size_t id_len,

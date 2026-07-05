@@ -8,12 +8,17 @@
 #include <ctype.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+#ifndef MSG_NOSIGNAL
+#define MSG_NOSIGNAL 0
+#endif
 
 #define HTTP_CLIENT_TIMEOUT_SEC 30
 
@@ -38,6 +43,11 @@ static int select_wait(int fd, int write_fd, int timeout_ms) {
     return select(fd + 1, write_fd ? NULL : &rfds, write_fd ? &wfds : NULL, NULL, &tv);
 }
 
+static void configure_client_socket(int fd) {
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+}
+
 static int write_all(int fd, const void *data, size_t len) {
     const char *p = data;
     size_t left = len;
@@ -49,7 +59,7 @@ static int write_all(int fd, const void *data, size_t len) {
         if (select_wait(fd, 1, 10000) <= 0) {
             return -1;
         }
-        ssize_t n = write(fd, p, left);
+        ssize_t n = send(fd, p, left, MSG_NOSIGNAL);
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
@@ -62,14 +72,65 @@ static int write_all(int fd, const void *data, size_t len) {
     return 0;
 }
 
-static int request_complete(const char *buf, size_t total, size_t *need_total) {
-    const char *hdr_end = NULL;
-    for (size_t i = 0; i + 3 < total; i++) {
-        if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n') {
-            hdr_end = buf + i;
+static void drain_client(int fd) {
+    char discard[512];
+    struct timeval tv = {0, 250000};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    for (;;) {
+        ssize_t n = read(fd, discard, sizeof(discard));
+        if (n <= 0) {
             break;
         }
     }
+}
+
+static void close_client(int fd) {
+    shutdown(fd, SHUT_WR);
+    drain_client(fd);
+    close(fd);
+}
+
+static const char *find_header_end(const char *buf, size_t total) {
+    for (size_t i = 0; i + 3 < total; i++) {
+        if (buf[i] == '\r' && buf[i + 1] == '\n' && buf[i + 2] == '\r' && buf[i + 3] == '\n') {
+            return buf + i;
+        }
+    }
+    return NULL;
+}
+
+static int header_has_chunked(const char *buf, const char *hdr_end) {
+    for (const char *p = buf; p < hdr_end; p++) {
+        if (strncasecmp(p, "Transfer-Encoding:", 18) == 0) {
+            const char *v = p + 18;
+            while (*v == ' ') {
+                v++;
+            }
+            if (strncasecmp(v, "chunked", 7) == 0) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+static int chunked_body_complete(const char *buf, size_t total, size_t hdr_len) {
+    const char *body = buf + hdr_len;
+    size_t body_len = total - hdr_len;
+    if (body_len < 5) {
+        return 0;
+    }
+    for (size_t i = 0; i + 4 < body_len; i++) {
+        if (body[i] == '0' && body[i + 1] == '\r' && body[i + 2] == '\n' &&
+            body[i + 3] == '\r' && body[i + 4] == '\n') {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int request_complete(const char *buf, size_t total, size_t *msg_len) {
+    const char *hdr_end = find_header_end(buf, total);
     if (!hdr_end) {
         return 0;
     }
@@ -90,20 +151,25 @@ static int request_complete(const char *buf, size_t total, size_t *need_total) {
         }
     }
 
+    if (!has_cl && header_has_chunked(buf, hdr_end)) {
+        if (!chunked_body_complete(buf, total, hdr_len)) {
+            return 0;
+        }
+        *msg_len = total;
+        return 1;
+    }
+
     if (!has_cl) {
-        *need_total = hdr_len;
+        *msg_len = hdr_len;
         return total >= hdr_len;
     }
 
-    *need_total = hdr_len + content_len;
-    return total >= *need_total;
+    *msg_len = hdr_len + content_len;
+    return total >= *msg_len;
 }
 
-static int read_request(int client_fd, char *buf, size_t buflen, size_t *total_out) {
-    size_t total = 0;
-    size_t need = 0;
-
-    while (total < buflen - 1) {
+static int fill_buffer(int client_fd, char *buf, size_t *total, size_t buflen) {
+    while (*total < buflen - 1) {
         if (s_running && !*s_running) {
             return -1;
         }
@@ -111,7 +177,7 @@ static int read_request(int client_fd, char *buf, size_t buflen, size_t *total_o
             return -1;
         }
 
-        ssize_t n = read(client_fd, buf + total, buflen - 1 - total);
+        ssize_t n = read(client_fd, buf + *total, buflen - 1 - *total);
         if (n < 0) {
             if (errno == EINTR) {
                 continue;
@@ -119,22 +185,27 @@ static int read_request(int client_fd, char *buf, size_t buflen, size_t *total_o
             return -1;
         }
         if (n == 0) {
-            break;
+            return (*total > 0) ? 0 : -1;
         }
 
-        total += (size_t)n;
-        buf[total] = '\0';
+        *total += (size_t)n;
+        buf[*total] = '\0';
+        return 0;
+    }
+    return -1;
+}
 
-        if (request_complete(buf, total, &need)) {
-            break;
+static int should_keep_alive(const http_request_t *req) {
+    const char *conn = http_get_header(req, "Connection");
+    if (conn) {
+        if (strcasecmp(conn, "close") == 0) {
+            return 0;
         }
-        if (need > 0 && total >= need) {
-            break;
+        if (strcasecmp(conn, "keep-alive") == 0) {
+            return 1;
         }
     }
-
-    *total_out = total;
-    return total > 0 ? 0 : -1;
+    return req->http_minor >= 1;
 }
 
 static void strtolower(char *s) {
@@ -189,15 +260,56 @@ static int header_line(const char *line, http_header_t *hdr) {
     return 0;
 }
 
-int http_parse_request(const char *raw, size_t raw_len, http_request_t *req) {
-    memset(req, 0, sizeof(*req));
-    const char *hdr_end = NULL;
-    for (size_t i = 0; i + 3 < raw_len; i++) {
-        if (raw[i] == '\r' && raw[i + 1] == '\n' && raw[i + 2] == '\r' && raw[i + 3] == '\n') {
-            hdr_end = raw + i;
+static size_t decode_chunked_body(const char *raw, size_t raw_len, size_t body_off, char *out,
+                                  size_t outlen) {
+    size_t out_pos = 0;
+    size_t pos = body_off;
+
+    while (pos < raw_len) {
+        size_t line_end = pos;
+        while (line_end + 1 < raw_len && !(raw[line_end] == '\r' && raw[line_end + 1] == '\n')) {
+            line_end++;
+        }
+        if (line_end + 1 >= raw_len) {
             break;
         }
+
+        char size_buf[16];
+        size_t size_len = line_end - pos;
+        if (size_len == 0 || size_len >= sizeof(size_buf)) {
+            break;
+        }
+        memcpy(size_buf, raw + pos, size_len);
+        size_buf[size_len] = '\0';
+
+        size_t chunk_size = (size_t)strtoul(size_buf, NULL, 16);
+        pos = line_end + 2;
+        if (chunk_size == 0) {
+            break;
+        }
+        if (pos + chunk_size > raw_len) {
+            break;
+        }
+        if (out_pos + chunk_size >= outlen) {
+            break;
+        }
+        memcpy(out + out_pos, raw + pos, chunk_size);
+        out_pos += chunk_size;
+        pos += chunk_size;
+        if (pos + 1 < raw_len && raw[pos] == '\r' && raw[pos + 1] == '\n') {
+            pos += 2;
+        }
     }
+
+    if (out_pos < outlen) {
+        out[out_pos] = '\0';
+    }
+    return out_pos;
+}
+
+int http_parse_request(const char *raw, size_t raw_len, http_request_t *req) {
+    memset(req, 0, sizeof(*req));
+    const char *hdr_end = find_header_end(raw, raw_len);
     if (!hdr_end) {
         return -1;
     }
@@ -221,6 +333,10 @@ int http_parse_request(const char *raw, size_t raw_len, http_request_t *req) {
     }
     util_strlcpy(req->method, method, sizeof(req->method));
     util_strlcpy(req->path, path, sizeof(req->path));
+    req->http_minor = 0;
+    if (sscanf(version, "HTTP/%*d.%d", &req->http_minor) != 1) {
+        req->http_minor = 1;
+    }
 
     while ((line = strtok_r(NULL, "\r\n", &save)) != NULL) {
         if (req->header_count >= HTTP_MAX_HEADERS) {
@@ -233,12 +349,17 @@ int http_parse_request(const char *raw, size_t raw_len, http_request_t *req) {
 
     size_t body_off = (size_t)(hdr_end - raw) + 4;
     if (body_off < raw_len) {
-        size_t blen = raw_len - body_off;
-        if (blen >= HTTP_MAX_BODY) {
-            blen = HTTP_MAX_BODY - 1;
+        size_t blen;
+        if (header_has_chunked(raw, hdr_end)) {
+            blen = decode_chunked_body(raw, raw_len, body_off, req->body, sizeof(req->body));
+        } else {
+            blen = raw_len - body_off;
+            if (blen >= HTTP_MAX_BODY) {
+                blen = HTTP_MAX_BODY - 1;
+            }
+            memcpy(req->body, raw + body_off, blen);
+            req->body[blen] = '\0';
         }
-        memcpy(req->body, raw + body_off, blen);
-        req->body[blen] = '\0';
         req->body_len = blen;
     }
 
@@ -316,17 +437,22 @@ int http_parse_bearer(const http_request_t *req, char *token, size_t token_len) 
     return token[0] ? 0 : -1;
 }
 
-void http_send_response(int client_fd, const http_response_t *res) {
+void http_send_response(int client_fd, const http_response_t *res, int keep_alive) {
     char header[1024];
+    char combined[HTTP_MAX_BODY + 2048];
+    size_t header_len;
+    size_t total_len;
+    const char *connection = keep_alive ? "keep-alive" : "close";
+
     if (res->no_body) {
-        snprintf(header, sizeof(header),
-                 "HTTP/1.1 %d OK\r\n"
-                 "Access-Control-Allow-Origin: *\r\n"
-                 "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
-                 "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
-                 "Connection: close\r\n\r\n",
-                 res->status);
-        write_all(client_fd, header, strlen(header));
+        header_len = (size_t)snprintf(header, sizeof(header),
+                                      "HTTP/1.1 %d No Content\r\n"
+                                      "Access-Control-Allow-Origin: *\r\n"
+                                      "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
+                                      "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+                                      "Connection: %s\r\n\r\n",
+                                      res->status, connection);
+        write_all(client_fd, header, header_len);
         return;
     }
 
@@ -341,58 +467,91 @@ void http_send_response(int client_fd, const http_response_t *res) {
         status_text = "Internal Server Error";
     }
 
-    snprintf(header, sizeof(header),
-             "HTTP/1.1 %d %s\r\n"
-             "Content-Type: application/json; charset=utf-8\r\n"
-             "Content-Length: %zu\r\n"
-             "Access-Control-Allow-Origin: *\r\n"
-             "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
-             "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
-             "Connection: close\r\n\r\n",
-             res->status, status_text, res->body_len);
-    write_all(client_fd, header, strlen(header));
+    header_len = (size_t)snprintf(header, sizeof(header),
+                                  "HTTP/1.1 %d %s\r\n"
+                                  "Content-Type: application/json; charset=utf-8\r\n"
+                                  "Content-Length: %zu\r\n"
+                                  "Access-Control-Allow-Origin: *\r\n"
+                                  "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
+                                  "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+                                  "Connection: %s\r\n\r\n",
+                                  res->status, status_text, res->body_len, connection);
+    total_len = header_len + res->body_len;
+    if (total_len <= sizeof(combined)) {
+        memcpy(combined, header, header_len);
+        if (res->body_len > 0) {
+            memcpy(combined + header_len, res->body, res->body_len);
+        }
+        write_all(client_fd, combined, total_len);
+        return;
+    }
+
+    write_all(client_fd, header, header_len);
     if (res->body_len > 0) {
         write_all(client_fd, res->body, res->body_len);
     }
 }
 
 void http_send_json(int client_fd, int status, const char *json) {
-  http_response_t res = {0};
-  res.status = status;
-  res.body_len = strlen(json);
-  strncpy(res.body, json, sizeof(res.body) - 1);
-  http_send_response(client_fd, &res);
+    http_response_t res = {0};
+    res.status = status;
+    res.body_len = strlen(json);
+    strncpy(res.body, json, sizeof(res.body) - 1);
+    http_send_response(client_fd, &res, 0);
 }
 
 static void handle_client(int client_fd) {
-    char buf[HTTP_MAX_BODY + 8192];
+    char buf[HTTP_MAX_BODY + 16384];
     size_t total = 0;
+    int keep_alive = 1;
 
-    if (read_request(client_fd, buf, sizeof(buf), &total) != 0) {
-        close(client_fd);
-        return;
+    while (keep_alive) {
+        size_t msg_len = 0;
+
+        while (!request_complete(buf, total, &msg_len)) {
+            if (total >= sizeof(buf) - 1) {
+                close_client(client_fd);
+                return;
+            }
+            if (fill_buffer(client_fd, buf, &total, sizeof(buf)) != 0) {
+                close_client(client_fd);
+                return;
+            }
+        }
+
+        char req_raw[HTTP_MAX_BODY + 8192];
+        if (msg_len >= sizeof(req_raw)) {
+            msg_len = sizeof(req_raw) - 1;
+        }
+        memcpy(req_raw, buf, msg_len);
+        if (total > msg_len) {
+            memmove(buf, buf + msg_len, total - msg_len);
+        }
+        total -= msg_len;
+
+        http_request_t req;
+        if (http_parse_request(req_raw, msg_len, &req) != 0) {
+            http_send_json(client_fd, 400,
+                           "{\"error\":\"bad_request\",\"message\":\"Invalid HTTP request\"}");
+            close_client(client_fd);
+            return;
+        }
+
+        const char *ct = http_get_header(&req, "Content-Type");
+        char parsed_body[HTTP_MAX_BODY];
+        http_parse_body(req.body, req.body_len, ct ? ct : "", parsed_body, sizeof(parsed_body));
+        if (parsed_body[0]) {
+            util_strlcpy(req.body, parsed_body, sizeof(req.body));
+            req.body_len = strlen(req.body);
+        }
+
+        http_response_t res;
+        handlers_route(&req, &res);
+        keep_alive = should_keep_alive(&req);
+        http_send_response(client_fd, &res, keep_alive);
     }
 
-    http_request_t req;
-    if (http_parse_request(buf, total, &req) != 0) {
-        http_send_json(client_fd, 400,
-                       "{\"error\":\"bad_request\",\"message\":\"Invalid HTTP request\"}");
-        close(client_fd);
-        return;
-    }
-
-    const char *ct = http_get_header(&req, "Content-Type");
-    char parsed_body[HTTP_MAX_BODY];
-    http_parse_body(req.body, req.body_len, ct ? ct : "", parsed_body, sizeof(parsed_body));
-    if (parsed_body[0]) {
-        util_strlcpy(req.body, parsed_body, sizeof(req.body));
-        req.body_len = strlen(req.body);
-    }
-
-    http_response_t res;
-    handlers_route(&req, &res);
-    http_send_response(client_fd, &res);
-    close(client_fd);
+    close_client(client_fd);
 }
 
 void http_shutdown(void) {
@@ -461,6 +620,7 @@ int http_serve(const char *host, uint16_t port, volatile sig_atomic_t *running) 
             perror("accept");
             break;
         }
+        configure_client_socket(client_fd);
         handle_client(client_fd);
     }
 

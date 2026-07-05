@@ -21,6 +21,7 @@ static void on_signal(int sig) {
 int main(void) {
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
+    signal(SIGPIPE, SIG_IGN);
 
     config_load();
 
