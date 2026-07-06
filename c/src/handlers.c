@@ -272,7 +272,7 @@ static void handle_tss_details(http_request_t *req, http_response_t *res) {
     }
     tse_info_t info;
     store_info(&info);
-    char json[512];
+    char json[8192];
     response_tss_details_json(info.serial_number, json, sizeof(json));
     set_json_response(res, 200, json);
 }
@@ -284,7 +284,27 @@ static void handle_info(http_request_t *req, http_response_t *res) {
     tse_info_t info;
     store_info(&info);
     char json[512];
-    response_info_json(info.registered_clients, info.transaction_counter, json, sizeof(json));
+    response_info_json(info.registered_clients, info.max_registered_clients,
+                       info.transaction_counter, info.max_started_transactions, json,
+                       sizeof(json));
+    set_json_response(res, 200, json);
+}
+
+static void handle_list_transactions(http_request_t *req, http_response_t *res) {
+    if (validate_bearer(req, res) != 0) {
+        return;
+    }
+    tse_transaction_t txs[128];
+    size_t count = 0;
+    if (store_list_open_transactions(txs, sizeof(txs) / sizeof(txs[0]), &count) != 0) {
+        char json[256];
+        response_error_json(500, "internal_error", "failed to list open transactions", json,
+                            sizeof(json));
+        set_json_response(res, 500, json);
+        return;
+    }
+    char json[HTTP_MAX_BODY];
+    response_open_transactions_json(txs, count, json, sizeof(json));
     set_json_response(res, 200, json);
 }
 
@@ -336,6 +356,8 @@ void handlers_route(http_request_t *req, http_response_t *res) {
             handle_tss_details(req, res);
         } else if (strcmp(path, "/info") == 0) {
             handle_info(req, res);
+        } else if (strcmp(path, "/transactions") == 0) {
+            handle_list_transactions(req, res);
         } else if (strcmp(path, "/") == 0 || strcmp(path, "/health") == 0) {
             handle_health(res);
         } else {

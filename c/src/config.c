@@ -94,14 +94,22 @@ void config_load(void) {
     util_strlcpy(g_config.worm_lib, env_or("CLOUDTSE_WORM_LIB", CLOUDTSE_DEFAULT_WORM_LIB),
                  sizeof(g_config.worm_lib));
     g_config.worm_admin_pin[0] = '\0';
+    g_config.worm_admin_puk[0] = '\0';
     g_config.worm_time_admin_pin[0] = '\0';
     const char *admin_pin = getenv("CLOUDTSE_WORM_ADMIN_PIN");
+    const char *admin_puk = getenv("CLOUDTSE_WORM_ADMIN_PUK");
     const char *time_pin = getenv("CLOUDTSE_WORM_TIME_ADMIN_PIN");
     if (admin_pin && admin_pin[0]) {
         util_strlcpy(g_config.worm_admin_pin, admin_pin, sizeof(g_config.worm_admin_pin));
+    }
+    if (admin_puk && admin_puk[0]) {
+        util_strlcpy(g_config.worm_admin_puk, admin_puk, sizeof(g_config.worm_admin_puk));
     }
     if (time_pin && time_pin[0]) {
         util_strlcpy(g_config.worm_time_admin_pin, time_pin,
                      sizeof(g_config.worm_time_admin_pin));
     }
+    util_strlcpy(g_config.worm_credential_seed,
+                 env_or("CLOUDTSE_WORM_CREDENTIAL_SEED", CLOUDTSE_DEFAULT_WORM_CREDENTIAL_SEED),
+                 sizeof(g_config.worm_credential_seed));
 }

@@ -15,7 +15,7 @@ typedef struct {
     char time_start[64];
     char time_end[64];
     int64_t signature_counter;
-    char signature_value[128];
+    char signature_value[256];
     char serial_number[128];
 } tse_transaction_t;
 
@@ -24,6 +24,8 @@ typedef struct {
     int64_t signature_counter;
     int64_t transaction_counter;
     int64_t registered_clients;
+    int64_t max_registered_clients;
+    int64_t max_started_transactions;
     bool initialized;
     char created_at[64];
     char fcc_version[64];
@@ -43,5 +45,6 @@ int store_finish_transaction(const char *client_id, int64_t transaction_number,
                              tse_transaction_t *out, char *err_code, size_t err_code_len,
                              char *err_msg, size_t err_msg_len);
 void store_info(tse_info_t *info);
+int store_list_open_transactions(tse_transaction_t *out, size_t max, size_t *out_count);
 
 #endif

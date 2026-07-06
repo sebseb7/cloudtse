@@ -14,6 +14,7 @@
 #define CLOUDTSE_DEFAULT_DB_PATH "data/cloudtse.db"
 #define CLOUDTSE_DEFAULT_TSE_DEVICE "/dev/sda"
 #define CLOUDTSE_DEFAULT_WORM_LIB "libWormAPI.so"
+#define CLOUDTSE_DEFAULT_WORM_CREDENTIAL_SEED "SwissbitSwissbit"
 
 typedef enum {
     TSE_MODE_SIM = 0,
@@ -34,7 +35,9 @@ typedef struct {
     char worm_path[512];
     char worm_lib[512];
     char worm_admin_pin[128];
+    char worm_admin_puk[128];
     char worm_time_admin_pin[128];
+    char worm_credential_seed[64];
 } cloudtse_config_t;
 
 extern cloudtse_config_t g_config;

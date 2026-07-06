@@ -76,6 +76,8 @@ In hardware mode, `/tssdetails` `serial` comes from the physical TSE when WormAP
 
 Hardware mode needs the **linux64** `libWormAPI.so`. Download from the [Swissbit TSE connector](https://www.mytivi.at/tseconnector/swissbit/nativelibs/linux64/libWormAPI.so) or the SDK, and place it at `libWormAPI/libWormAPI.so`.
 
+On a brand-new/factory-reset TSE (`initializationState == UNINITIALIZED`), the server automatically runs the one-time `worm_tse_setup` provisioning sequence (self-test → setup with the Swissbit credential seed → self-test again) using the admin PIN/PUK and time-admin PIN from config, generating and persisting them to the SQLite DB if not set. Watch the startup log for the generated credentials the first time this runs — set `CLOUDTSE_WORM_ADMIN_PIN` / `CLOUDTSE_WORM_ADMIN_PUK` / `CLOUDTSE_WORM_TIME_ADMIN_PIN` explicitly if you want to control them instead.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -88,8 +90,10 @@ Hardware mode needs the **linux64** `libWormAPI.so`. Download from the [Swissbit
 | `CLOUDTSE_WORM_LIB` | `libWormAPI/libWormAPI.so` | Path to WormAPI shared library |
 | `CLOUDTSE_WORM_PATH` | auto | Mount path with `TSE_INFO.DAT` (e.g. `/mnt/tse`) |
 | `CLOUDTSE_TSE_DEVICE` | `/dev/sda` | Block device for direct TSE access |
-| `CLOUDTSE_WORM_ADMIN_PIN` | — | TSE admin PIN (if required) |
-| `CLOUDTSE_WORM_TIME_ADMIN_PIN` | — | TSE time-admin PIN (if required) |
+| `CLOUDTSE_WORM_ADMIN_PIN` | auto-generated | TSE admin PIN (5 digits). Auto-generated and cached in the DB on first run against an uninitialized TSE if not set |
+| `CLOUDTSE_WORM_ADMIN_PUK` | auto-generated | TSE admin PUK (6 digits). Same auto-provisioning behavior as the admin PIN |
+| `CLOUDTSE_WORM_TIME_ADMIN_PIN` | auto-generated | TSE time-admin PIN (5 digits). Same auto-provisioning behavior as the admin PIN |
+| `CLOUDTSE_WORM_CREDENTIAL_SEED` | `SwissbitSwissbit` | Credential seed used to provision a brand-new/uninitialized TSE via `worm_tse_setup`. Only override if your TSE reseller issued a different seed |
 | `CLOUDTSE_PUBLIC_IP` | — | IP shown to clients when auto-detect fails |
 | `CLOUDTSE_DB_PATH` | `data/cloudtse.db` | SQLite persistence |
 | `CLOUDTSE_LOG` | `1` | Set `0` to disable request logging |

@@ -30,11 +30,51 @@ int response_finish_transaction_json(const tse_transaction_t *tx, char *out, siz
                : -1;
 }
 
+int response_open_transactions_json(const tse_transaction_t *txs, size_t count, char *out,
+                                    size_t outlen) {
+    size_t pos = 0;
+    int n = snprintf(out + pos, outlen - pos, "{\"openTransactions\":[");
+    if (n < 0 || (size_t)n >= outlen - pos) {
+        return -1;
+    }
+    pos += (size_t)n;
+
+    for (size_t i = 0; i < count; i++) {
+        const tse_transaction_t *tx = &txs[i];
+        char esc_client[512];
+        char esc_ext[512];
+        char esc_ptype[1024];
+        json_escape(tx->client_id, esc_client, sizeof(esc_client));
+        json_escape(tx->external_transaction_id, esc_ext, sizeof(esc_ext));
+        json_escape(tx->process_type, esc_ptype, sizeof(esc_ptype));
+        char log_time[64];
+        util_fcc_log_time(tx->time_start, log_time, sizeof(log_time));
+
+        n = snprintf(out + pos, outlen - pos,
+                    "%s{\"transactionNumber\":\"%lld\",\"clientId\":\"%s\","
+                    "\"externalTransactionId\":\"%s\",\"processType\":\"%s\","
+                    "\"startTime\":\"%s\"}",
+                    i == 0 ? "" : ",", (long long)tx->transaction_number, esc_client, esc_ext,
+                    esc_ptype, log_time);
+        if (n < 0 || (size_t)n >= outlen - pos) {
+            return -1;
+        }
+        pos += (size_t)n;
+    }
+
+    n = snprintf(out + pos, outlen - pos, "],\"count\":%zu}", count);
+    if (n < 0 || (size_t)n >= outlen - pos) {
+        return -1;
+    }
+    return 0;
+}
+
 int response_tss_details_json(const char *serial, char *out, size_t outlen) {
     char norm[128];
     store_normalize_serial(serial, norm, sizeof(norm));
     const char *pubkey = tse_worm_is_active() ? tse_worm_public_key_hex() : norm;
-    const char *cert = tse_worm_is_active() ? "HARDWARE" : "SIMULATOR";
+    const char *real_cert = tse_worm_is_active() ? tse_worm_certificate_base64() : NULL;
+    const char *cert = real_cert ? real_cert : (tse_worm_is_active() ? "HARDWARE" : "SIMULATOR");
     return snprintf(out, outlen,
                     "{\"serial\":\"%s\",\"timeFormat\":\"yyyy-MM-dd'T'HH:mm:ssX\","
                     "\"encoding\":\"UTF-8\",\"publicKey\":\"%s\","
@@ -44,11 +84,13 @@ int response_tss_details_json(const char *serial, char *out, size_t outlen) {
                : -1;
 }
 
-int response_info_json(int64_t registered_clients, int64_t transaction_counter, char *out,
+int response_info_json(int64_t registered_clients, int64_t max_registered_clients,
+                       int64_t transaction_counter, int64_t max_started_transactions, char *out,
                        size_t outlen) {
     return snprintf(out, outlen,
-                    "{\"maxNumberClients\":\"100\",\"maxNumberTransactions\":\"500\","
+                    "{\"maxNumberClients\":\"%lld\",\"maxNumberTransactions\":\"%lld\","
                     "\"currentNumberOfTransactions\":\"%lld\",\"registeredClients\":\"%lld\"}",
+                    (long long)max_registered_clients, (long long)max_started_transactions,
                     (long long)transaction_counter, (long long)registered_clients) < (int)outlen
                ? 0
                : -1;

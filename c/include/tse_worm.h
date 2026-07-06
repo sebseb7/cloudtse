@@ -19,6 +19,7 @@ int tse_worm_finish_transaction(const char *client_id, int64_t transaction_numbe
                                 char *err_msg, size_t err_msg_len);
 void tse_worm_fill_info(tse_info_t *info);
 const char *tse_worm_public_key_hex(void);
+const char *tse_worm_certificate_base64(void);
 
 void tse_worm_director_set_block(tse_block_t *blk);
 

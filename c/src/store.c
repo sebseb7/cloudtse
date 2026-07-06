@@ -111,6 +111,76 @@ int store_register_client(const char *serial_number) {
     return rc == SQLITE_DONE ? 0 : -1;
 }
 
+/*
+ * The hardware TSE is the source of truth for signatures, but it only
+ * exposes a *count* of started transactions (worm_info_startedTransactions),
+ * not their identities. Mirror start/finish into the local `transactions`
+ * table (state only, no re-signing) so GET /transactions can report which
+ * transaction numbers are still open ("started" on the TSE, no matching
+ * finish yet), even in hardware mode.
+ */
+static void record_transaction_open(const tse_transaction_t *tx, const char *external_tx_id) {
+    const char *sql =
+        "INSERT INTO transactions ("
+        "transaction_number, client_id, external_transaction_id,"
+        "process_type, process_data, state, time_start,"
+        "signature_counter, signature_value"
+        ") VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?) "
+        "ON CONFLICT(transaction_number) DO UPDATE SET "
+        "client_id = excluded.client_id, external_transaction_id = excluded.external_transaction_id, "
+        "process_type = excluded.process_type, state = 'ACTIVE';";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        return;
+    }
+    char now[64];
+    util_now_iso(now, sizeof(now));
+    sqlite3_bind_int64(stmt, 1, tx->transaction_number);
+    sqlite3_bind_text(stmt, 2, tx->client_id, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 3, external_tx_id && external_tx_id[0] ? external_tx_id : NULL, -1,
+                      SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 4, tx->process_type, -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 5, "", -1, SQLITE_STATIC);
+    sqlite3_bind_text(stmt, 6, now, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 7, tx->signature_counter);
+    sqlite3_bind_text(stmt, 8, tx->signature_value, -1, SQLITE_STATIC);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+static void record_transaction_finished(int64_t transaction_number) {
+    const char *sql = "UPDATE transactions SET state = 'FINISHED', time_end = ? "
+                      "WHERE transaction_number = ?;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        return;
+    }
+    char now[64];
+    util_now_iso(now, sizeof(now));
+    sqlite3_bind_text(stmt, 1, now, -1, SQLITE_STATIC);
+    sqlite3_bind_int64(stmt, 2, transaction_number);
+    sqlite3_step(stmt);
+    sqlite3_finalize(stmt);
+}
+
+int store_list_open_transactions(tse_transaction_t *out, size_t max, size_t *out_count) {
+    *out_count = 0;
+    const char *sql = "SELECT transaction_number, client_id, external_transaction_id, "
+                      "process_type, process_data, state, time_start, time_end, "
+                      "signature_counter, signature_value "
+                      "FROM transactions WHERE state = 'ACTIVE' ORDER BY transaction_number;";
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2(g_db, sql, -1, &stmt, NULL) != SQLITE_OK) {
+        return -1;
+    }
+    while (*out_count < max && sqlite3_step(stmt) == SQLITE_ROW) {
+        load_transaction_row(stmt, &out[*out_count]);
+        (*out_count)++;
+    }
+    sqlite3_finalize(stmt);
+    return 0;
+}
+
 int store_start_transaction(const char *client_id, const char *process_type,
                             const char *process_data, const char *external_tx_id,
                             tse_transaction_t *out) {
@@ -125,6 +195,7 @@ int store_start_transaction(const char *client_id, const char *process_type,
             strncpy(out->external_transaction_id, external_tx_id,
                     sizeof(out->external_transaction_id) - 1);
         }
+        record_transaction_open(out, external_tx_id);
         return 0;
     }
     int64_t tx_num = db_increment_counter("transaction_counter");
@@ -181,9 +252,13 @@ int store_finish_transaction(const char *client_id, int64_t transaction_number,
                              tse_transaction_t *out, char *err_code, size_t err_code_len,
                              char *err_msg, size_t err_msg_len) {
     if (tse_worm_is_active()) {
-        return tse_worm_finish_transaction(client_id, transaction_number, process_type,
-                                           process_data, out, err_code, err_code_len, err_msg,
-                                           err_msg_len);
+        int rc = tse_worm_finish_transaction(client_id, transaction_number, process_type,
+                                             process_data, out, err_code, err_code_len, err_msg,
+                                             err_msg_len);
+        if (rc == 0) {
+            record_transaction_finished(transaction_number);
+        }
+        return rc;
     }
     (void)client_id;
     const char *get_sql = "SELECT transaction_number, client_id, external_transaction_id, "
@@ -290,4 +365,10 @@ void store_info(tse_info_t *info) {
         }
         sqlite3_finalize(stmt);
     }
+    /* Simulator has no real hardware limits; these match the values printed
+     * in the swissbit dev-kit docs for a fresh TSE and are only used when
+     * not running against real hardware (see tse_worm_fill_info for the
+     * real values). */
+    info->max_registered_clients = 100;
+    info->max_started_transactions = 500;
 }
