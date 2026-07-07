@@ -2,6 +2,7 @@
 #include "config.h"
 #include "db.h"
 #include "json.h"
+#include "log.h"
 #include "response.h"
 #include "store.h"
 #include "util.h"
@@ -31,7 +32,7 @@ static int is_transaction_path(const char *path) {
 
 static void log_field(const char *key, const char *value) {
     if (value && value[0]) {
-        printf("    %s: %s\n", key, value);
+        log_info("    %s: %s", key, value);
     }
 }
 
@@ -50,7 +51,7 @@ static void log_transaction_payload(const char *label, const http_request_t *req
     json_get_string(req->body, "processData", process_data, sizeof(process_data));
     json_get_string(req->body, "externalTransactionId", external_id, sizeof(external_id));
 
-    printf("  %s:\n", label);
+    log_info("  %s:", label);
     log_field("clientId", client_id);
     log_field("processType", process_type);
     log_field("externalTransactionId", external_id);
@@ -59,9 +60,9 @@ static void log_transaction_payload(const char *label, const http_request_t *req
     if (process_data[0]) {
         char decoded[4096];
         if (util_base64_decode(process_data, decoded, sizeof(decoded)) > 0) {
-            printf("    processData (decoded): %s\n", decoded);
+            log_info("    processData (decoded): %s", decoded);
         } else {
-            printf("    processData (decoded): [not base64 UTF-8]\n");
+            log_info("    processData (decoded): [not base64 UTF-8]");
         }
     }
 }
@@ -70,18 +71,16 @@ static void log_request(const http_request_t *req, const char *path) {
     if (!g_config.log_requests) {
         return;
     }
-    char now[64];
-    util_now_iso(now, sizeof(now));
-    printf("[%s] %s %s\n", now, req->method, path);
+    log_info("%s %s", req->method, path);
     const char *auth = http_get_header(req, "Authorization");
     if (auth) {
-        printf("  authorization: %s\n", auth);
+        log_info("  authorization: %s", auth);
     }
     if (req->body_len > 0) {
         if (is_transaction_path(path)) {
             log_transaction_payload("transaction payload", req);
         } else {
-            printf("  body: %s\n", req->body);
+            log_info("  body: %s", req->body);
         }
     }
 }
@@ -90,9 +89,9 @@ static void log_response(int status, const char *body) {
     if (!g_config.log_requests) {
         return;
     }
-    printf("  → %d\n", status);
+    log_info("  → %d", status);
     if (body && body[0]) {
-        printf("%s\n", body);
+        log_info("%s", body);
     }
 }
 

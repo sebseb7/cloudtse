@@ -1,6 +1,7 @@
 #include "store.h"
 #include "config.h"
 #include "db.h"
+#include "log.h"
 #include "tse_worm.h"
 #include "util.h"
 
@@ -72,7 +73,7 @@ void store_init(void) {
     char buf[128];
     if (g_config.tse_mode == TSE_MODE_HARDWARE) {
         if (tse_worm_init() != 0) {
-            fprintf(stderr, "cloudtse: hardware TSE init failed — falling back to simulator\n");
+            log_warn("hardware TSE init failed — falling back to simulator");
         }
     }
     if (db_get_setting("created_at", g_created_at, sizeof(g_created_at))) {
@@ -188,7 +189,7 @@ int store_start_transaction(const char *client_id, const char *process_type,
         char err[256];
         if (tse_worm_start_transaction(client_id, process_type, process_data, out, err,
                                      sizeof(err)) != 0) {
-            fprintf(stderr, "cloudtse: %s\n", err);
+            log_error("%s", err);
             return -1;
         }
         if (external_tx_id && external_tx_id[0]) {

@@ -1,14 +1,27 @@
 #include "config.h"
 #include "db.h"
 #include "http.h"
+#include "log.h"
 #include "network.h"
 #include "store.h"
 #include "tse_worm.h"
 
+#include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+static pthread_mutex_t g_log_mu = PTHREAD_MUTEX_INITIALIZER;
+
+static void log_lock_fn(bool lock, void *udata) {
+    (void)udata;
+    if (lock) {
+        pthread_mutex_lock(&g_log_mu);
+    } else {
+        pthread_mutex_unlock(&g_log_mu);
+    }
+}
 
 static volatile sig_atomic_t g_running = 1;
 
@@ -19,6 +32,19 @@ static void on_signal(int sig) {
 }
 
 int main(void) {
+
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    /*
+     * log.c (vendored in src/log.c) writes to stdout above and fflushes
+     * after every call on top of that, so console output is guaranteed
+     * visible immediately regardless of libc/terminal buffering behavior.
+     * The background time-sync thread logs concurrently with the request
+     * handler, so serialize output with a mutex to avoid interleaved lines.
+     */
+    log_set_lock(log_lock_fn, NULL);
+    log_set_level(LOG_TRACE);
+
     signal(SIGINT, on_signal);
     signal(SIGTERM, on_signal);
     signal(SIGPIPE, SIG_IGN);
@@ -39,38 +65,35 @@ int main(void) {
     char ips[8][64];
     int ip_count = network_local_ips(ips, 8);
 
-    printf("\n");
-    printf("  BSI TR-03153 cloud TSE — development only [C]\n");
-    printf("  ─────────────────────────────────────────────────────\n");
-    printf("  Listening:  http://%s:%u\n", g_config.host, g_config.port);
+    log_info("BSI TR-03153 cloud TSE — development only [C]");
+    log_info("─────────────────────────────────────────────────────");
+    log_info("Listening:  http://%s:%u", g_config.host, g_config.port);
     if (have_public) {
-        printf("  Client IP:  %s\n", public_ip);
+        log_info("Client IP:  %s", public_ip);
     } else {
         for (int i = 0; i < ip_count; i++) {
-            printf("  Client IP:  %s  (private — set CLOUDTSE_PUBLIC_IP or allow outbound HTTPS)\n",
-                   ips[i]);
+            log_info("Client IP:  %s  (private — set CLOUDTSE_PUBLIC_IP or allow outbound HTTPS)",
+                      ips[i]);
         }
     }
-    printf("  Port:       %u\n", g_config.port);
-    printf("  EAS-Code:   %s\n", g_config.eas_code);
-    printf("  TSE serial: %s\n", g_config.tse_serial);
-    printf("  Database:   %s\n", g_config.db_path);
+    log_info("Port:       %u", g_config.port);
+    log_info("EAS-Code:   %s", g_config.eas_code);
+    log_info("TSE serial: %s", g_config.tse_serial);
+    log_info("Database:   %s", g_config.db_path);
     if (g_config.tse_mode == TSE_MODE_HARDWARE) {
-        printf("  TSE mode:   hardware (%s)\n", g_config.tse_device);
+        log_info("TSE mode:   hardware (%s)", g_config.tse_device);
         if (tse_worm_is_active()) {
-            printf("  WormAPI:    %s\n", g_config.worm_lib);
+            log_info("WormAPI:    %s", g_config.worm_lib);
         } else {
-            printf("  WormAPI:    not loaded (simulator fallback)\n");
+            log_info("WormAPI:    not loaded (simulator fallback)");
         }
     } else {
-        printf("  TSE mode:   simulator\n");
+        log_info("TSE mode:   simulator");
     }
-    printf("\n");
-    printf("    IP           = one of the addresses above\n");
-    printf("    Port         = %u\n", g_config.port);
-    printf("    Seriennummer = your Kassen-ID / EAS serial\n");
-    printf("    EAS-Code     = %s\n", g_config.eas_code);
-    printf("\n");
+    log_info("IP           = one of the addresses above");
+    log_info("Port         = %u", g_config.port);
+    log_info("Seriennummer = your Kassen-ID / EAS serial");
+    log_info("EAS-Code     = %s", g_config.eas_code);
 
     if (!g_running) {
         store_shutdown();

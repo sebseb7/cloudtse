@@ -2,6 +2,7 @@
 
 #include "config.h"
 #include "db.h"
+#include "log.h"
 #include "tse_block.h"
 #include "util.h"
 
@@ -158,10 +159,9 @@ static void worm_safe_client_id(const char *client_id, char *out, size_t outlen)
     safe[prefix_len] = '-';
     util_strlcpy(safe + prefix_len + 1, hash_hex, sizeof(safe) - prefix_len - 1);
     util_strlcpy(out, safe, outlen);
-    fprintf(stderr,
-            "cloudtse: clientId '%s' is %zu bytes, over the TSE's %d-byte limit; using '%s' on "
-            "the TSE instead (stable per client)\n",
-            client_id, len, WORM_CLIENT_ID_MAX_LEN, out);
+    log_warn("clientId '%s' is %zu bytes, over the TSE's %d-byte limit; using '%s' on the TSE "
+             "instead (stable per client)",
+             client_id, len, WORM_CLIENT_ID_MAX_LEN, out);
 }
 
 static worm_store_new_fn p_worm_store_new;
@@ -221,14 +221,13 @@ static worm_get_log_message_certificate_fn p_worm_get_log_message_certificate;
  * timing regardless of whether the underlying transport is the mount or
  * our own block I/O (tse_block.c logs that layer separately).
  */
-#define WORM_HW_CALL(label, call_expr)                                                   \
-    ({                                                                                   \
-        double __t0 = util_monotonic_ms();                                               \
-        long long __rc = (long long)(call_expr);                                         \
-        fprintf(stderr, "cloudtse: TSE HW CALL %-40s -> rc=%lld (%.3f ms)\n", (label),    \
-                __rc, util_monotonic_ms() - __t0);                                       \
-        fflush(stderr);                                                                  \
-        __rc;                                                                            \
+#define WORM_HW_CALL(label, call_expr)                                              \
+    ({                                                                              \
+        double __t0 = util_monotonic_ms();                                          \
+        long long __rc = (long long)(call_expr);                                    \
+        log_debug("TSE HW CALL %-40s -> rc=%lld (%.3f ms)", (label), __rc,           \
+                  util_monotonic_ms() - __t0);                                      \
+        __rc;                                                                       \
     })
 
 static void *resolve(void *lib, const char *primary, const char *alt) {
@@ -242,7 +241,7 @@ static void *resolve(void *lib, const char *primary, const char *alt) {
 static int require_sym(void *lib, const char *primary, const char *alt, void **out) {
     *out = resolve(lib, primary, alt);
     if (!*out) {
-        fprintf(stderr, "cloudtse: missing symbol %s in %s\n", primary, g_config.worm_lib);
+        log_error("missing symbol %s in %s", primary, g_config.worm_lib);
         return -1;
     }
     return 0;
@@ -268,7 +267,7 @@ static int open_store_legacy(const char *path, bool quiet) {
     int rc = (int)WORM_HW_CALL("worm_init", p_worm_init(&ctx, path));
     if (rc != WORM_ERROR_NOERROR || !ctx) {
         if (!quiet) {
-            fprintf(stderr, "cloudtse: worm_init(%s) failed (error %d)\n", path, rc);
+            log_warn("worm_init(%s) failed (error %d)", path, rc);
         }
         return -1;
     }
@@ -292,8 +291,7 @@ static int open_store_legacy_block(void) {
                                (void *)WormLegacy_closeKeepAlive,
                                (void *)WormLegacy_readKeepAlive));
     if (rc != WORM_ERROR_NOERROR || !ctx) {
-        fprintf(stderr, "cloudtse: worm_init_with_communication_callbacks failed (error %d)\n",
-                rc);
+        log_error("worm_init_with_communication_callbacks failed (error %d)", rc);
         return -1;
     }
     g_store = ctx;
@@ -344,11 +342,11 @@ static int ensure_block_open(void) {
         return 0;
     }
 
-    fprintf(stderr, "cloudtse: TSE block open failed for %s", primary);
     if (fallback) {
-        fprintf(stderr, " and %s", fallback);
+        log_error("TSE block open failed for %s and %s: %s", primary, fallback, err);
+    } else {
+        log_error("TSE block open failed for %s: %s", primary, err);
     }
-    fprintf(stderr, ": %s\n", err);
     return -1;
 }
 
@@ -463,34 +461,33 @@ static void log_worm_diagnostics(const char *context) {
         return;
     }
 
-    fprintf(stderr, "cloudtse: TSE diagnostics (%s):\n", context);
+    log_info("TSE diagnostics (%s):", context);
     if (p_worm_info_has_valid_time) {
         unsigned long long v = p_worm_info_has_valid_time(info);
-        fprintf(stderr, "  hasValidTime:        %s%s\n", v ? "yes" : "NO",
-                v ? "" : "  <- set CLOUDTSE_WORM_TIME_ADMIN_PIN and restart, or run "
-                        "worm_tse_updateTime as TimeAdmin");
+        log_info("  hasValidTime:        %s%s", v ? "yes" : "NO",
+                 v ? "" : "  <- set CLOUDTSE_WORM_TIME_ADMIN_PIN and restart, or run "
+                          "worm_tse_updateTime as TimeAdmin");
     }
     if (p_worm_info_has_passed_self_test) {
         unsigned long long v = p_worm_info_has_passed_self_test(info);
-        fprintf(stderr, "  hasPassedSelfTest:   %s\n", v ? "yes" : "NO");
+        log_info("  hasPassedSelfTest:   %s", v ? "yes" : "NO");
     }
     if (p_worm_info_has_changed_time_admin_pin) {
         unsigned long long v = p_worm_info_has_changed_time_admin_pin(info);
-        fprintf(stderr, "  hasChangedTimeAdminPin: %s%s\n", v ? "yes" : "NO",
-                v ? "" : "  <- TimeAdmin PIN is still the factory default; login/updateTime may "
-                        "be rejected until it is changed");
+        log_info("  hasChangedTimeAdminPin: %s%s", v ? "yes" : "NO",
+                 v ? "" : "  <- TimeAdmin PIN is still the factory default; login/updateTime may "
+                          "be rejected until it is changed");
     }
     if (p_worm_info_registered_clients && p_worm_info_max_registered_clients) {
-        fprintf(stderr, "  registeredClients:   %llu / %llu\n",
-                p_worm_info_registered_clients(info), p_worm_info_max_registered_clients(info));
+        log_info("  registeredClients:   %llu / %llu", p_worm_info_registered_clients(info),
+                 p_worm_info_max_registered_clients(info));
     }
     if (p_worm_info_started_transactions && p_worm_info_max_started_transactions) {
-        fprintf(stderr, "  startedTransactions: %llu / %llu\n",
-                p_worm_info_started_transactions(info), p_worm_info_max_started_transactions(info));
+        log_info("  startedTransactions: %llu / %llu", p_worm_info_started_transactions(info),
+                 p_worm_info_max_started_transactions(info));
     }
     if (p_worm_info_is_tx_in_progress) {
-        fprintf(stderr, "  isTransactionInProgress: %s\n",
-                p_worm_info_is_tx_in_progress(info) ? "yes" : "no");
+        log_info("  isTransactionInProgress: %s", p_worm_info_is_tx_in_progress(info) ? "yes" : "no");
     }
     if (p_worm_info_free) {
         p_worm_info_free(info);
@@ -561,9 +558,7 @@ static void ensure_tse_provisioned(void) {
         return;
     }
 
-    fprintf(stderr,
-            "cloudtse: TSE is uninitialized — running one-time provisioning via "
-            "worm_tse_setup...\n");
+    log_warn("TSE is uninitialized — running one-time provisioning via worm_tse_setup...");
 
     char admin_pin[16];
     char admin_puk[16];
@@ -592,12 +587,11 @@ static void ensure_tse_provisioned(void) {
                           admin_pin, (int)strlen(admin_pin), time_admin_pin,
                           (int)strlen(time_admin_pin), bootstrap_client));
     if (rc != WORM_ERROR_NOERROR) {
-        fprintf(stderr,
-                "cloudtse: worm_tse_setup failed (error %d). If this TSE was not sold directly "
-                "by Swissbit, set CLOUDTSE_WORM_CREDENTIAL_SEED to the seed provided by your "
-                "reseller and restart. Warning: 3 failed setup attempts with a wrong seed will "
-                "permanently lock the TSE.\n",
-                rc);
+        log_error("worm_tse_setup failed (error %d). If this TSE was not sold directly by "
+                  "Swissbit, set CLOUDTSE_WORM_CREDENTIAL_SEED to the seed provided by your "
+                  "reseller and restart. Warning: 3 failed setup attempts with a wrong seed will "
+                  "permanently lock the TSE.",
+                  rc);
         return;
     }
 
@@ -607,14 +601,12 @@ static void ensure_tse_provisioned(void) {
                  sizeof(g_config.worm_time_admin_pin));
     worm_client_mark_registered(bootstrap_client);
 
-    fprintf(stderr, "cloudtse: TSE provisioning complete. Credentials cached in %s:\n",
-            g_config.db_path);
-    fprintf(stderr, "  Admin PIN:     %s\n", admin_pin);
-    fprintf(stderr, "  Admin PUK:     %s\n", admin_puk);
-    fprintf(stderr, "  TimeAdmin PIN: %s\n", time_admin_pin);
-    fprintf(stderr,
-            "  (set CLOUDTSE_WORM_ADMIN_PIN / CLOUDTSE_WORM_ADMIN_PUK / "
-            "CLOUDTSE_WORM_TIME_ADMIN_PIN to override in the future)\n");
+    log_info("TSE provisioning complete. Credentials cached in %s:", g_config.db_path);
+    log_info("  Admin PIN:     %s", admin_pin);
+    log_info("  Admin PUK:     %s", admin_puk);
+    log_info("  TimeAdmin PIN: %s", time_admin_pin);
+    log_info("  (set CLOUDTSE_WORM_ADMIN_PIN / CLOUDTSE_WORM_ADMIN_PUK / "
+             "CLOUDTSE_WORM_TIME_ADMIN_PIN to override in the future)");
 
     if (p_worm_run_self_test) {
         (void)WORM_HW_CALL("worm_tse_runSelfTest",
@@ -683,9 +675,8 @@ static void ensure_self_test_passed(void) {
             logged_in = worm_user_login_call(WORM_USER_ADMIN, g_config.worm_admin_pin) ==
                         WORM_ERROR_NOERROR;
             if (!logged_in) {
-                fprintf(stderr,
-                        "cloudtse: Admin login failed (check CLOUDTSE_WORM_ADMIN_PIN) while "
-                        "trying to register a client for self-test\n");
+                log_warn("Admin login failed (check CLOUDTSE_WORM_ADMIN_PIN) while trying to "
+                         "register a client for self-test");
             }
         }
         int reg_rc = (int)WORM_HW_CALL("worm_tse_registerClient",
@@ -702,12 +693,11 @@ static void ensure_self_test_passed(void) {
                 return;
             }
         } else {
-            fprintf(stderr, "cloudtse: worm_tse_registerClient('cloudtse-startup') failed (error %d)\n",
-                    reg_rc);
+            log_error("worm_tse_registerClient('cloudtse-startup') failed (error %d)", reg_rc);
         }
     }
 
-    fprintf(stderr, "cloudtse: worm_tse_runSelfTest failed (error %d)\n", rc);
+    log_error("worm_tse_runSelfTest failed (error %d)", rc);
 }
 
 static bool worm_has_valid_time(void) {
@@ -730,11 +720,10 @@ static bool worm_has_valid_time(void) {
 static bool perform_time_sync(void) {
     if (!g_config.worm_time_admin_pin[0]) {
         if (!worm_has_valid_time()) {
-            fprintf(stderr,
-                    "cloudtse: WARNING TSE has no valid time set and "
-                    "CLOUDTSE_WORM_TIME_ADMIN_PIN is not configured. Transactions will fail "
-                    "until the TSE clock is synchronized (log in as TimeAdmin and call "
-                    "worm_tse_updateTime, or set CLOUDTSE_WORM_TIME_ADMIN_PIN and restart).\n");
+            log_warn("TSE has no valid time set and CLOUDTSE_WORM_TIME_ADMIN_PIN is not "
+                     "configured. Transactions will fail until the TSE clock is synchronized "
+                     "(log in as TimeAdmin and call worm_tse_updateTime, or set "
+                     "CLOUDTSE_WORM_TIME_ADMIN_PIN and restart).");
             return false;
         }
         return true;
@@ -744,11 +733,10 @@ static bool perform_time_sync(void) {
     }
     int login_rc = worm_user_login_call(WORM_USER_TIME_ADMIN, g_config.worm_time_admin_pin);
     if (login_rc != WORM_ERROR_NOERROR) {
-        fprintf(stderr,
-                "cloudtse: TimeAdmin login failed (error %d) — check "
-                "CLOUDTSE_WORM_TIME_ADMIN_PIN. Note: 3 consecutive wrong PIN attempts lock the "
-                "TimeAdmin role until unblocked with the TimeAdmin PUK.\n",
-                login_rc);
+        log_warn("TimeAdmin login failed (error %d) — check CLOUDTSE_WORM_TIME_ADMIN_PIN. Note: "
+                 "3 consecutive wrong PIN attempts lock the TimeAdmin role until unblocked with "
+                 "the TimeAdmin PUK.",
+                 login_rc);
         return false;
     }
     unsigned long long now = (unsigned long long)time(NULL);
@@ -756,7 +744,7 @@ static bool perform_time_sync(void) {
         WORM_HW_CALL("worm_tse_updateTime", p_worm_update_time(g_store, now)) ==
         WORM_ERROR_NOERROR;
     if (!ok) {
-        fprintf(stderr, "cloudtse: tse_updateTime failed\n");
+        log_error("tse_updateTime failed");
     }
     worm_user_logout_call(WORM_USER_TIME_ADMIN);
     return ok;
@@ -862,15 +850,12 @@ static void fill_tx_from_response(worm_handle response, tse_transaction_t *out) 
         if (sig && sig_len > 0) {
             if (util_base64_encode(sig, (size_t)sig_len, out->signature_value,
                                    sizeof(out->signature_value)) != 0) {
-                fprintf(stderr,
-                        "cloudtse: signature (%d bytes) didn't fit in the %zu-byte "
-                        "signature_value buffer; leaving it empty\n",
-                        sig_len, sizeof(out->signature_value));
+                log_error("signature (%d bytes) didn't fit in the %zu-byte signature_value "
+                          "buffer; leaving it empty",
+                          sig_len, sizeof(out->signature_value));
             }
         } else {
-            fprintf(stderr,
-                    "cloudtse: TSE returned no signature bytes for this transaction "
-                    "response\n");
+            log_warn("TSE returned no signature bytes for this transaction response");
         }
     }
     if (g_serial[0]) {
@@ -898,7 +883,7 @@ int tse_worm_init(void) {
 
     g_lib = dlopen(g_config.worm_lib, RTLD_NOW | RTLD_LOCAL);
     if (!g_lib) {
-        fprintf(stderr, "cloudtse: cannot load %s: %s\n", g_config.worm_lib, dlerror());
+        log_error("cannot load %s: %s", g_config.worm_lib, dlerror());
         return -1;
     }
 
@@ -1014,9 +999,8 @@ int tse_worm_init(void) {
         if (opened != 0 && ensure_block_open() == 0) {
             opened = open_store_legacy_block();
             if (opened == 0 && g_config.worm_path[0]) {
-                fprintf(stderr,
-                        "cloudtse: using block I/O on %s (mount at %s is read-only or unavailable)\n",
-                        g_block.device, g_config.worm_path);
+                log_warn("using block I/O on %s (mount at %s is read-only or unavailable)",
+                         g_block.device, g_config.worm_path);
             }
         }
     } else {
@@ -1036,10 +1020,9 @@ int tse_worm_init(void) {
         }
     }
     if (opened != 0) {
-        fprintf(stderr,
-                "cloudtse: worm init failed. For legacy libWormAPI set CLOUDTSE_WORM_PATH to the "
-                "mounted TSE (e.g. /mnt/tse) or ensure %s is accessible.\n",
-                g_config.tse_device);
+        log_error("worm init failed. For legacy libWormAPI set CLOUDTSE_WORM_PATH to the mounted "
+                  "TSE (e.g. /mnt/tse) or ensure %s is accessible.",
+                  g_config.tse_device);
         dlclose(g_lib);
         g_lib = NULL;
         tse_block_close(&g_block);
@@ -1070,17 +1053,16 @@ int tse_worm_init(void) {
 
     g_active = true;
     start_time_sync_thread();
-    printf("  TSE mode:   hardware\n");
+    log_info("TSE mode:   hardware");
     if (g_block.offsets_valid) {
-        printf("  TSE device: %s (info LBA %u)\n", g_block.device, g_block.lba_info);
+        log_info("TSE device: %s (info LBA %u)", g_block.device, g_block.lba_info);
     } else {
-        printf("  TSE device: %s (mounted)\n", g_config.tse_device);
+        log_info("TSE device: %s (mounted)", g_config.tse_device);
     }
-    printf("  Worm path:  %s\n", g_store_path);
-    printf("  WormAPI:    %s (%s)\n", g_config.worm_lib,
-           g_legacy_api ? "legacy C API" : "store API");
+    log_info("Worm path:  %s", g_store_path);
+    log_info("WormAPI:    %s (%s)", g_config.worm_lib, g_legacy_api ? "legacy C API" : "store API");
     if (g_serial[0]) {
-        printf("  TSE serial: %s\n", g_serial);
+        log_info("TSE serial: %s", g_serial);
     }
     return 0;
 }
@@ -1117,7 +1099,7 @@ int tse_worm_register_client(const char *client_id) {
         logged_in =
             worm_user_login_call(WORM_USER_ADMIN, g_config.worm_admin_pin) == WORM_ERROR_NOERROR;
         if (!logged_in) {
-            fprintf(stderr, "cloudtse: Admin login failed (check CLOUDTSE_WORM_ADMIN_PIN)\n");
+            log_warn("Admin login failed (check CLOUDTSE_WORM_ADMIN_PIN)");
         }
     }
     int rc = (int)WORM_HW_CALL("worm_tse_registerClient",
@@ -1130,8 +1112,7 @@ int tse_worm_register_client(const char *client_id) {
     }
     pthread_mutex_unlock(&g_worm_mu);
     if (rc != WORM_ERROR_NOERROR) {
-        fprintf(stderr, "cloudtse: worm_tse_registerClient('%s') failed (error %d)\n", safe_id,
-                rc);
+        log_error("worm_tse_registerClient('%s') failed (error %d)", safe_id, rc);
     }
     if (rc == WORM_ERROR_NOERROR) {
         worm_client_mark_registered(client_id);
@@ -1154,10 +1135,9 @@ static void ensure_client_registered(const char *client_id) {
      */
     int rc = tse_worm_register_client(client_id);
     if (rc != 0) {
-        fprintf(stderr,
-                "cloudtse: auto-register of client '%s' returned an error (likely already "
-                "registered; ignoring)\n",
-                client_id);
+        log_debug("auto-register of client '%s' returned an error (likely already registered; "
+                  "ignoring)",
+                  client_id);
     }
     worm_client_mark_registered(client_id);
 }
@@ -1224,6 +1204,17 @@ int tse_worm_finish_transaction(const char *client_id, int64_t transaction_numbe
     worm_safe_client_id(client_id, safe_id, sizeof(safe_id));
 
     pthread_mutex_lock(&g_worm_mu);
+    /*
+     * A transaction can stay open for an arbitrary amount of time between
+     * start and finish, so the clock that was valid at start_transaction
+     * time isn't guaranteed to still be valid here. Check and proactively
+     * resync before finishing too, matching start_transaction, instead of
+     * just letting worm_transaction_finish fail with
+     * WORM_ERROR_NO_TIME_SET.
+     */
+    if (!worm_has_valid_time()) {
+        (void)perform_time_sync();
+    }
     worm_handle response = p_worm_tx_resp_new(g_store);
     if (!response) {
         pthread_mutex_unlock(&g_worm_mu);

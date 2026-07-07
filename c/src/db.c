@@ -1,5 +1,6 @@
 #include "db.h"
 #include "config.h"
+#include "log.h"
 #include "store.h"
 #include "util.h"
 
@@ -33,11 +34,11 @@ static int ensure_parent_dir(const char *path) {
 
 int db_open(const char *path) {
     if (ensure_parent_dir(path) != 0) {
-        fprintf(stderr, "Failed to create database directory for %s\n", path);
+        log_error("Failed to create database directory for %s", path);
         return -1;
     }
     if (sqlite3_open(path, &g_db) != SQLITE_OK) {
-        fprintf(stderr, "sqlite3_open: %s\n", sqlite3_errmsg(g_db));
+        log_error("sqlite3_open: %s", sqlite3_errmsg(g_db));
         return -1;
     }
     sqlite3_exec(g_db, "PRAGMA journal_mode = WAL;", NULL, NULL, NULL);
@@ -88,7 +89,7 @@ int db_init_schema(void) {
 
     char *err = NULL;
     if (sqlite3_exec(g_db, sql, NULL, NULL, &err) != SQLITE_OK) {
-        fprintf(stderr, "schema: %s\n", err);
+        log_error("schema: %s", err);
         sqlite3_free(err);
         return -1;
     }

@@ -1,4 +1,5 @@
 #include "tse_block.h"
+#include "log.h"
 #include "util.h"
 
 #include <errno.h>
@@ -119,11 +120,9 @@ int tse_block_read_lba(const tse_block_t *blk, uint64_t lba, void *buf, size_t l
     double t0 = util_monotonic_ms();
     int rc = read_exact(blk->fd, buf, len, (off_t)(lba * TSE_BLOCK_SIZE));
     double elapsed_ms = util_monotonic_ms() - t0;
-    fprintf(stderr,
-            "cloudtse: TSE HW READ  device=%s region=%-12s lba=%llu len=%zu -> %s (%.3f ms)\n",
-            blk->device, region_for_lba(blk, lba, len), (unsigned long long)lba, len,
-            rc == 0 ? "ok" : "FAILED", elapsed_ms);
-    fflush(stderr);
+    log_debug("TSE HW READ  device=%s region=%-12s lba=%llu len=%zu -> %s (%.3f ms)", blk->device,
+              region_for_lba(blk, lba, len), (unsigned long long)lba, len,
+              rc == 0 ? "ok" : "FAILED", elapsed_ms);
     return rc;
 }
 
@@ -137,11 +136,9 @@ int tse_block_write_lba(const tse_block_t *blk, uint64_t lba, const void *buf, s
     double t0 = util_monotonic_ms();
     int rc = write_exact(blk->fd, buf, len, (off_t)(lba * TSE_BLOCK_SIZE));
     double elapsed_ms = util_monotonic_ms() - t0;
-    fprintf(stderr,
-            "cloudtse: TSE HW WRITE device=%s region=%-12s lba=%llu len=%zu -> %s (%.3f ms)\n",
-            blk->device, region_for_lba(blk, lba, len), (unsigned long long)lba, len,
-            rc == 0 ? "ok" : "FAILED", elapsed_ms);
-    fflush(stderr);
+    log_debug("TSE HW WRITE device=%s region=%-12s lba=%llu len=%zu -> %s (%.3f ms)", blk->device,
+              region_for_lba(blk, lba, len), (unsigned long long)lba, len,
+              rc == 0 ? "ok" : "FAILED", elapsed_ms);
     return rc;
 }
 
