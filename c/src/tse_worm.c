@@ -209,6 +209,28 @@ static worm_info_u64_fn p_worm_info_init_state;
 static worm_tse_setup_fn p_worm_tse_setup;
 static worm_get_log_message_certificate_fn p_worm_get_log_message_certificate;
 
+/*
+ * In legacy/mounted mode (CLOUDTSE_WORM_PATH set to e.g. /mnt/tse), the
+ * closed-source WormAPI talks to the physical TSE directly through the
+ * mounted filesystem, completely bypassing tse_block.c. That means the
+ * only place we can observe/time "requests to hardware" in that mode is
+ * right here, at the boundary where we call into the vendor library.
+ * Every call that reaches the physical device (info reads, transaction
+ * start/finish, login/logout, self-test, time sync, registration,
+ * certificate fetch, setup) goes through this helper so it's logged with
+ * timing regardless of whether the underlying transport is the mount or
+ * our own block I/O (tse_block.c logs that layer separately).
+ */
+#define WORM_HW_CALL(label, call_expr)                                                   \
+    ({                                                                                   \
+        double __t0 = util_monotonic_ms();                                               \
+        long long __rc = (long long)(call_expr);                                         \
+        fprintf(stderr, "cloudtse: TSE HW CALL %-40s -> rc=%lld (%.3f ms)\n", (label),    \
+                __rc, util_monotonic_ms() - __t0);                                       \
+        fflush(stderr);                                                                  \
+        __rc;                                                                            \
+    })
+
 static void *resolve(void *lib, const char *primary, const char *alt) {
     void *p = dlsym(lib, primary);
     if (!p && alt) {
@@ -230,14 +252,20 @@ static int worm_user_login_call(int user_id, const char *pin) {
     if (g_legacy_api) {
         typedef int (*legacy_fn)(worm_handle, unsigned char, const char *, unsigned int);
         legacy_fn login = (legacy_fn)(void *)p_worm_user_login;
-        return login(g_store, (unsigned char)user_id, pin, (unsigned int)strlen(pin));
+        return (int)WORM_HW_CALL("worm_user_login",
+                                  login(g_store, (unsigned char)user_id, pin,
+                                        (unsigned int)strlen(pin)));
     }
-    return p_worm_user_login(g_store, user_id, pin);
+    return (int)WORM_HW_CALL("worm_user_login", p_worm_user_login(g_store, user_id, pin));
+}
+
+static int worm_user_logout_call(int user_id) {
+    return (int)WORM_HW_CALL("worm_user_logout", p_worm_user_logout(g_store, user_id));
 }
 
 static int open_store_legacy(const char *path, bool quiet) {
     worm_handle ctx = 0;
-    int rc = p_worm_init(&ctx, path);
+    int rc = (int)WORM_HW_CALL("worm_init", p_worm_init(&ctx, path));
     if (rc != WORM_ERROR_NOERROR || !ctx) {
         if (!quiet) {
             fprintf(stderr, "cloudtse: worm_init(%s) failed (error %d)\n", path, rc);
@@ -255,11 +283,14 @@ static int open_store_legacy_block(void) {
     }
     tse_worm_director_set_block(&g_block);
     worm_handle ctx = 0;
-    int rc = p_worm_init_callbacks(
-        &ctx, NULL, (void *)WormLegacy_readInfo, (void *)WormLegacy_readComm,
-        (void *)WormLegacy_writeComm, (void *)WormLegacy_readStore, (void *)WormLegacy_writeStore,
-        (void *)WormLegacy_openKeepAlive, (void *)WormLegacy_closeKeepAlive,
-        (void *)WormLegacy_readKeepAlive);
+    int rc = (int)WORM_HW_CALL(
+        "worm_init_with_communication_callbacks",
+        p_worm_init_callbacks(&ctx, NULL, (void *)WormLegacy_readInfo,
+                               (void *)WormLegacy_readComm, (void *)WormLegacy_writeComm,
+                               (void *)WormLegacy_readStore, (void *)WormLegacy_writeStore,
+                               (void *)WormLegacy_openKeepAlive,
+                               (void *)WormLegacy_closeKeepAlive,
+                               (void *)WormLegacy_readKeepAlive));
     if (rc != WORM_ERROR_NOERROR || !ctx) {
         fprintf(stderr, "cloudtse: worm_init_with_communication_callbacks failed (error %d)\n",
                 rc);
@@ -356,7 +387,8 @@ static void refresh_certificate(void) {
         return;
     }
     uint32_t len = 0;
-    int rc = p_worm_get_log_message_certificate(g_store, NULL, &len);
+    int rc = (int)WORM_HW_CALL("worm_getLogMessageCertificate(size)",
+                                p_worm_get_log_message_certificate(g_store, NULL, &len));
     if (rc != WORM_ERROR_NOERROR || len == 0 || len > 8192) {
         return;
     }
@@ -365,7 +397,8 @@ static void refresh_certificate(void) {
         return;
     }
     uint32_t out_len = len;
-    rc = p_worm_get_log_message_certificate(g_store, buf, &out_len);
+    rc = (int)WORM_HW_CALL("worm_getLogMessageCertificate(data)",
+                            p_worm_get_log_message_certificate(g_store, buf, &out_len));
     if (rc == WORM_ERROR_NOERROR && out_len > 0) {
         util_base64_encode(buf, out_len, g_certificate_base64, sizeof(g_certificate_base64));
     }
@@ -380,7 +413,7 @@ static void refresh_info_fields(void) {
     if (!info) {
         return;
     }
-    if (p_worm_info_read(info) == WORM_ERROR_NOERROR) {
+    if (WORM_HW_CALL("worm_info_read", p_worm_info_read(info)) == WORM_ERROR_NOERROR) {
         if (g_legacy_api && p_worm_info_serial_out) {
             unsigned char *serial = NULL;
             unsigned int size = 0;
@@ -423,7 +456,7 @@ static void log_worm_diagnostics(const char *context) {
     if (!info) {
         return;
     }
-    if (p_worm_info_read(info) != WORM_ERROR_NOERROR) {
+    if (WORM_HW_CALL("worm_info_read", p_worm_info_read(info)) != WORM_ERROR_NOERROR) {
         if (p_worm_info_free) {
             p_worm_info_free(info);
         }
@@ -517,7 +550,7 @@ static void ensure_tse_provisioned(void) {
     }
     unsigned long long state = 0;
     bool have_state = false;
-    if (p_worm_info_read(info) == WORM_ERROR_NOERROR) {
+    if (WORM_HW_CALL("worm_info_read", p_worm_info_read(info)) == WORM_ERROR_NOERROR) {
         state = p_worm_info_init_state(info);
         have_state = true;
     }
@@ -549,12 +582,15 @@ static void ensure_tse_provisioned(void) {
     /* Required as the first command after worm_init; expected to fail on an
      * uninitialized TSE. Ignoring the result is by design. */
     if (p_worm_run_self_test) {
-        (void)p_worm_run_self_test(g_store, bootstrap_client);
+        (void)WORM_HW_CALL("worm_tse_runSelfTest",
+                            p_worm_run_self_test(g_store, bootstrap_client));
     }
 
-    int rc = p_worm_tse_setup(g_store, seed, (int)strlen(seed), admin_puk,
-                              (int)strlen(admin_puk), admin_pin, (int)strlen(admin_pin),
-                              time_admin_pin, (int)strlen(time_admin_pin), bootstrap_client);
+    int rc = (int)WORM_HW_CALL(
+        "worm_tse_setup",
+        p_worm_tse_setup(g_store, seed, (int)strlen(seed), admin_puk, (int)strlen(admin_puk),
+                          admin_pin, (int)strlen(admin_pin), time_admin_pin,
+                          (int)strlen(time_admin_pin), bootstrap_client));
     if (rc != WORM_ERROR_NOERROR) {
         fprintf(stderr,
                 "cloudtse: worm_tse_setup failed (error %d). If this TSE was not sold directly "
@@ -581,23 +617,53 @@ static void ensure_tse_provisioned(void) {
             "CLOUDTSE_WORM_TIME_ADMIN_PIN to override in the future)\n");
 
     if (p_worm_run_self_test) {
-        (void)p_worm_run_self_test(g_store, bootstrap_client);
+        (void)WORM_HW_CALL("worm_tse_runSelfTest",
+                            p_worm_run_self_test(g_store, bootstrap_client));
     }
 }
 
 /*
- * The TSE requires a self-test to pass after every power-cycle/re-init
- * before it will accept logins, registrations state changes or
- * transactions (WORM_ERROR_WRONG_STATE_NEEDS_SELF_TEST). The self test
- * itself requires a client ID that was *already* registered on this
- * physical TSE in a previous session (registering a new client is one of
- * the few operations allowed even before self-test passes). We remember
- * the last client ID that worked in the local DB so restarts keep working
- * without operator input; if none is known yet (very first boot after
- * provisioning) we register one and retry.
+ * hasPassedSelfTest is hardware state read from the TSE's own info block,
+ * not per-process session state. As long as the physical device wasn't
+ * actually power-cycled (unplugged/replugged, or the host machine
+ * rebooted), a self-test that passed in a previous run of this process is
+ * still recorded on the TSE itself.
+ */
+static bool worm_has_passed_self_test(void) {
+    bool passed = false;
+    if (g_store && p_worm_info_new && p_worm_info_read && p_worm_info_has_passed_self_test) {
+        worm_handle info = p_worm_info_new(g_store);
+        if (info) {
+            if (WORM_HW_CALL("worm_info_read", p_worm_info_read(info)) == WORM_ERROR_NOERROR) {
+                passed = p_worm_info_has_passed_self_test(info) != 0;
+            }
+            if (p_worm_info_free) {
+                p_worm_info_free(info);
+            }
+        }
+    }
+    return passed;
+}
+
+/*
+ * The TSE requires a self-test to pass after every actual power-cycle of
+ * the physical device before it will accept logins, registration state
+ * changes, or transactions (WORM_ERROR_WRONG_STATE_NEEDS_SELF_TEST).
+ * hasPassedSelfTest is hardware state, so if the TSE stayed powered across
+ * a restart of this process, it's already satisfied and rerunning the
+ * self-test is a needless HW round trip. The self test itself requires a
+ * client ID that was *already* registered on this physical TSE in a
+ * previous session (registering a new client is one of the few operations
+ * allowed even before self-test passes). We remember the last client ID
+ * that worked in the local DB so restarts keep working without operator
+ * input; if none is known yet (very first boot after provisioning) we
+ * register one and retry.
  */
 static void ensure_self_test_passed(void) {
     if (!p_worm_run_self_test) {
+        return;
+    }
+    if (worm_has_passed_self_test()) {
         return;
     }
 
@@ -605,7 +671,7 @@ static void ensure_self_test_passed(void) {
     db_get_setting("worm_known_client", known, sizeof(known));
     const char *candidate = known[0] ? known : "cloudtse-startup";
 
-    int rc = p_worm_run_self_test(g_store, candidate);
+    int rc = (int)WORM_HW_CALL("worm_tse_runSelfTest", p_worm_run_self_test(g_store, candidate));
     if (rc == WORM_ERROR_NOERROR) {
         db_set_setting("worm_known_client", candidate);
         return;
@@ -622,12 +688,14 @@ static void ensure_self_test_passed(void) {
                         "trying to register a client for self-test\n");
             }
         }
-        int reg_rc = p_worm_register_client(g_store, "cloudtse-startup");
+        int reg_rc = (int)WORM_HW_CALL("worm_tse_registerClient",
+                                        p_worm_register_client(g_store, "cloudtse-startup"));
         if (logged_in) {
-            p_worm_user_logout(g_store, WORM_USER_ADMIN);
+            worm_user_logout_call(WORM_USER_ADMIN);
         }
         if (reg_rc == WORM_ERROR_NOERROR) {
-            rc = p_worm_run_self_test(g_store, "cloudtse-startup");
+            rc = (int)WORM_HW_CALL("worm_tse_runSelfTest",
+                                    p_worm_run_self_test(g_store, "cloudtse-startup"));
             if (rc == WORM_ERROR_NOERROR) {
                 db_set_setting("worm_known_client", "cloudtse-startup");
                 worm_client_mark_registered("cloudtse-startup");
@@ -647,7 +715,7 @@ static bool worm_has_valid_time(void) {
     if (g_store && p_worm_info_new && p_worm_info_read && p_worm_info_has_valid_time) {
         worm_handle info = p_worm_info_new(g_store);
         if (info) {
-            if (p_worm_info_read(info) == WORM_ERROR_NOERROR) {
+            if (WORM_HW_CALL("worm_info_read", p_worm_info_read(info)) == WORM_ERROR_NOERROR) {
                 has_valid_time = p_worm_info_has_valid_time(info) != 0;
             }
             if (p_worm_info_free) {
@@ -684,11 +752,13 @@ static bool perform_time_sync(void) {
         return false;
     }
     unsigned long long now = (unsigned long long)time(NULL);
-    bool ok = p_worm_update_time(g_store, now) == WORM_ERROR_NOERROR;
+    bool ok =
+        WORM_HW_CALL("worm_tse_updateTime", p_worm_update_time(g_store, now)) ==
+        WORM_ERROR_NOERROR;
     if (!ok) {
         fprintf(stderr, "cloudtse: tse_updateTime failed\n");
     }
-    p_worm_user_logout(g_store, WORM_USER_TIME_ADMIN);
+    worm_user_logout_call(WORM_USER_TIME_ADMIN);
     return ok;
 }
 
@@ -697,8 +767,12 @@ static bool perform_time_sync(void) {
  * (worm_info_maxTimeSynchronizationDelay) after the last worm_tse_updateTime
  * call, after which every transaction start/finish fails with
  * WORM_ERROR_NO_TIME_SET until it is refreshed. A single sync at startup is
- * not enough for a long-running server, so keep re-syncing periodically in
- * the background for as long as the process runs.
+ * not enough for a long-running server, so keep checking periodically in
+ * the background for as long as the process runs, at half the allowed
+ * window for headroom. Each check is a cheap read-only info query; the
+ * actual login+updateTime+logout resync (3 signed log messages, i.e. 3
+ * signature-counter increments on the device) only runs when the clock has
+ * actually gone invalid, not on every wakeup.
  */
 static void *time_sync_thread_main(void *arg) {
     (void)arg;
@@ -713,7 +787,7 @@ static void *time_sync_thread_main(void *arg) {
         if (g_store && p_worm_info_new && p_worm_info_read && p_worm_info_max_time_sync_delay) {
             worm_handle info = p_worm_info_new(g_store);
             if (info) {
-                if (p_worm_info_read(info) == WORM_ERROR_NOERROR) {
+                if (WORM_HW_CALL("worm_info_read", p_worm_info_read(info)) == WORM_ERROR_NOERROR) {
                     unsigned long long delay = p_worm_info_max_time_sync_delay(info);
                     if (delay > 10) {
                         /* resync at half the allowed window for headroom */
@@ -731,7 +805,16 @@ static void *time_sync_thread_main(void *arg) {
 
         pthread_mutex_lock(&g_worm_mu);
         if (g_active) {
-            (void)perform_time_sync();
+            /*
+             * login + updateTime + logout are each their own signed log
+             * message on the TSE, so each burns 3 entries off the device's
+             * finite signature counter. Skip the round trip entirely when
+             * the clock is already valid instead of unconditionally
+             * resyncing every cycle.
+             */
+            if (!worm_has_valid_time()) {
+                (void)perform_time_sync();
+            }
         }
         pthread_mutex_unlock(&g_worm_mu);
         if (!g_active) {
@@ -967,7 +1050,18 @@ int tse_worm_init(void) {
     refresh_certificate();
     ensure_tse_provisioned();
     ensure_self_test_passed();
-    perform_time_sync();
+    /*
+     * The TSE remembers whether it has valid time independently of this
+     * process (it's fiscal state on the device, not in-memory). A
+     * TimeAdmin login + updateTime + logout round trip costs ~2x the USB
+     * command latency (seen: ~400ms combined) even when nothing needs to
+     * change, so skip it at startup if the clock is already valid — the
+     * background thread (time_sync_thread_main) will keep it that way and
+     * resync proactively well before it would expire.
+     */
+    if (!worm_has_valid_time()) {
+        perform_time_sync();
+    }
     log_worm_diagnostics("startup");
 
     if (g_serial[0]) {
@@ -1026,12 +1120,13 @@ int tse_worm_register_client(const char *client_id) {
             fprintf(stderr, "cloudtse: Admin login failed (check CLOUDTSE_WORM_ADMIN_PIN)\n");
         }
     }
-    int rc = p_worm_register_client(g_store, safe_id);
+    int rc = (int)WORM_HW_CALL("worm_tse_registerClient",
+                                p_worm_register_client(g_store, safe_id));
     if (rc == WORM_ERROR_NOERROR && p_worm_run_self_test) {
-        (void)p_worm_run_self_test(g_store, safe_id);
+        (void)WORM_HW_CALL("worm_tse_runSelfTest", p_worm_run_self_test(g_store, safe_id));
     }
     if (logged_in) {
-        p_worm_user_logout(g_store, WORM_USER_ADMIN);
+        worm_user_logout_call(WORM_USER_ADMIN);
     }
     pthread_mutex_unlock(&g_worm_mu);
     if (rc != WORM_ERROR_NOERROR) {
@@ -1096,7 +1191,9 @@ int tse_worm_start_transaction(const char *client_id, const char *process_type,
      * pointer even when its length is 0 and reject NULL with
      * WORM_ERROR_TSE_INVALID_PARAMETER. Pass a valid empty buffer instead.
      */
-    int rc = p_worm_tx_start(g_store, safe_id, (const unsigned char *)"", 0, ptype, response);
+    int rc = (int)WORM_HW_CALL(
+        "worm_transaction_start",
+        p_worm_tx_start(g_store, safe_id, (const unsigned char *)"", 0, ptype, response));
     if (rc != WORM_ERROR_NOERROR) {
         p_worm_tx_resp_free(response);
         log_worm_diagnostics("transaction_start failed");
@@ -1150,8 +1247,10 @@ int tse_worm_finish_transaction(const char *client_id, int64_t transaction_numbe
         }
     }
 
-    int rc = p_worm_tx_finish(g_store, safe_id, (unsigned long long)transaction_number, pdata,
-                              pdlen, ptype, response);
+    int rc = (int)WORM_HW_CALL(
+        "worm_transaction_finish",
+        p_worm_tx_finish(g_store, safe_id, (unsigned long long)transaction_number, pdata, pdlen,
+                          ptype, response));
     if (rc != WORM_ERROR_NOERROR) {
         p_worm_tx_resp_free(response);
         log_worm_diagnostics("transaction_finish failed");
@@ -1182,7 +1281,7 @@ void tse_worm_fill_info(tse_info_t *info) {
     if (g_store && p_worm_info_new && p_worm_info_read) {
         worm_handle wi = p_worm_info_new(g_store);
         if (wi) {
-            if (p_worm_info_read(wi) == WORM_ERROR_NOERROR) {
+            if (WORM_HW_CALL("worm_info_read", p_worm_info_read(wi)) == WORM_ERROR_NOERROR) {
                 if (p_worm_info_registered_clients) {
                     info->registered_clients = (int64_t)p_worm_info_registered_clients(wi);
                 }

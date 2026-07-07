@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+double util_monotonic_ms(void);
 void util_now_iso(char *buf, size_t buflen);
 void util_fcc_log_time(const char *iso_string, char *buf, size_t buflen);
 int util_random_bytes(uint8_t *buf, size_t len);

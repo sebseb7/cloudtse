@@ -67,7 +67,7 @@ int main(void) {
     }
     printf("\n");
     printf("    IP           = one of the addresses above\n");
-    printf("    Port         = 20001\n");
+    printf("    Port         = %u\n", g_config.port);
     printf("    Seriennummer = your Kassen-ID / EAS serial\n");
     printf("    EAS-Code     = %s\n", g_config.eas_code);
     printf("\n");

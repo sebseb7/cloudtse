@@ -90,6 +90,25 @@ int tse_block_load_offsets(tse_block_t *blk) {
     return 0;
 }
 
+static const char *region_for_lba(const tse_block_t *blk, uint64_t lba, size_t len) {
+    (void)len;
+    if (lba == TSE_OFFSET_TABLE_LBA) {
+        return "offset-table";
+    }
+    if (blk->offsets_valid) {
+        if (lba == blk->lba_info) {
+            return "info";
+        }
+        if (lba == blk->lba_comm) {
+            return "comm";
+        }
+        if (lba >= blk->lba_store) {
+            return "store";
+        }
+    }
+    return "unknown";
+}
+
 int tse_block_read_lba(const tse_block_t *blk, uint64_t lba, void *buf, size_t len) {
     if (blk->fd < 0 || len == 0) {
         return -1;
@@ -97,7 +116,15 @@ int tse_block_read_lba(const tse_block_t *blk, uint64_t lba, void *buf, size_t l
     if (len % TSE_BLOCK_SIZE != 0) {
         return -1;
     }
-    return read_exact(blk->fd, buf, len, (off_t)(lba * TSE_BLOCK_SIZE));
+    double t0 = util_monotonic_ms();
+    int rc = read_exact(blk->fd, buf, len, (off_t)(lba * TSE_BLOCK_SIZE));
+    double elapsed_ms = util_monotonic_ms() - t0;
+    fprintf(stderr,
+            "cloudtse: TSE HW READ  device=%s region=%-12s lba=%llu len=%zu -> %s (%.3f ms)\n",
+            blk->device, region_for_lba(blk, lba, len), (unsigned long long)lba, len,
+            rc == 0 ? "ok" : "FAILED", elapsed_ms);
+    fflush(stderr);
+    return rc;
 }
 
 int tse_block_write_lba(const tse_block_t *blk, uint64_t lba, const void *buf, size_t len) {
@@ -107,7 +134,15 @@ int tse_block_write_lba(const tse_block_t *blk, uint64_t lba, const void *buf, s
     if (len % TSE_BLOCK_SIZE != 0) {
         return -1;
     }
-    return write_exact(blk->fd, buf, len, (off_t)(lba * TSE_BLOCK_SIZE));
+    double t0 = util_monotonic_ms();
+    int rc = write_exact(blk->fd, buf, len, (off_t)(lba * TSE_BLOCK_SIZE));
+    double elapsed_ms = util_monotonic_ms() - t0;
+    fprintf(stderr,
+            "cloudtse: TSE HW WRITE device=%s region=%-12s lba=%llu len=%zu -> %s (%.3f ms)\n",
+            blk->device, region_for_lba(blk, lba, len), (unsigned long long)lba, len,
+            rc == 0 ? "ok" : "FAILED", elapsed_ms);
+    fflush(stderr);
+    return rc;
 }
 
 int tse_block_read_info(const tse_block_t *blk, uint8_t buf[TSE_BLOCK_SIZE]) {
