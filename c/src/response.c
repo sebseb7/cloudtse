@@ -97,17 +97,17 @@ int response_info_json(int64_t registered_clients, int64_t max_registered_client
 }
 
 int response_health_json(const tse_info_t *info, char *out, size_t outlen) {
-    char esc_path[1024];
-    json_escape(info->db_path, esc_path, sizeof(esc_path));
     return snprintf(out, outlen,
                     "{\"status\":\"ok\",\"service\":\"cloudtse\","
                     "\"version\":\"%s\",\"serialNumber\":\"%s\","
-                    "\"signatureCounter\":%lld,\"transactionCounter\":%lld,"
                     "\"registeredClients\":%lld,\"initialized\":true,"
-                    "\"createdAt\":\"%s\",\"fccVersion\":\"%s\",\"dbPath\":\"%s\"}",
-                    g_config.fcc_version, info->serial_number, (long long)info->signature_counter,
-                    (long long)info->transaction_counter, (long long)info->registered_clients,
-                    info->created_at, info->fcc_version, esc_path) < (int)outlen
+                    "\"createdAt\":\"%s\",\"fccVersion\":\"%s\","
+                    "\"hardwareVersion\":\"%s\",\"firmwareVersion\":\"%s\","
+                    "\"wormApiVersion\":\"%s\"}",
+                    g_config.fcc_version, info->serial_number,
+                    (long long)info->registered_clients, info->created_at, info->fcc_version,
+                    info->hardware_version, info->firmware_version, info->worm_api_version) <
+                   (int)outlen
                ? 0
                : -1;
 }

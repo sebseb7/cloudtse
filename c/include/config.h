@@ -12,7 +12,7 @@
 #define CLOUDTSE_DEFAULT_FCC_VERSION "4.4.0-sim"
 #define CLOUDTSE_DEFAULT_FCC_VERSION_HW "4.4.0-hw"
 #define CLOUDTSE_DEFAULT_DB_PATH "data/cloudtse.db"
-#define CLOUDTSE_DEFAULT_TSE_DEVICE "/dev/sda"
+#define CLOUDTSE_DEFAULT_TSE_DEVICE ""
 #define CLOUDTSE_DEFAULT_WORM_LIB "libWormAPI.so"
 #define CLOUDTSE_DEFAULT_WORM_CREDENTIAL_SEED "SwissbitSwissbit"
 
@@ -26,6 +26,7 @@ typedef struct {
     uint16_t port;
     char public_ip[64];
     char eas_code[128];
+    char allowed_client_serial[256];
     char tse_serial[128];
     char fcc_version[64];
     char db_path[512];

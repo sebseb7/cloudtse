@@ -156,6 +156,16 @@ static void handle_oauth(http_request_t *req, http_response_t *res) {
     }
 
     const char *client_serial = client_id[0] ? client_id : "unknown";
+
+    if (g_config.allowed_client_serial[0] &&
+        strcmp(client_serial, g_config.allowed_client_serial) != 0) {
+        char json[256];
+        response_error_json(401, "unauthorized", "Client is not authorized to register", json,
+                            sizeof(json));
+        set_json_response(res, 401, json);
+        return;
+    }
+
     if (strcmp(client_serial, "unknown") != 0) {
         store_register_client(client_serial);
     }

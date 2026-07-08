@@ -30,6 +30,9 @@ typedef struct {
     char created_at[64];
     char fcc_version[64];
     char db_path[512];
+    char hardware_version[32];
+    char firmware_version[32];
+    char worm_api_version[32];
 } tse_info_t;
 
 void store_init(void);

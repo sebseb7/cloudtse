@@ -47,6 +47,11 @@ void config_load(void) {
     const char *host = env_or("CLOUDTSE_HOST", CLOUDTSE_DEFAULT_HOST);
     const char *port_str = env_or("CLOUDTSE_PORT", "20001");
     const char *eas = env_or("CLOUDTSE_EAS_CODE", CLOUDTSE_DEFAULT_EAS_CODE);
+    /* No compiled-in default on purpose: this must come from .env (loaded
+     * into the environment by start.sh) so it stays out of version control
+     * and matches whichever client was actually provisioned. Empty/unset
+     * means open self-registration (any client_id + correct EAS code). */
+    const char *allowed_client = env_or("CLOUDTSE_ALLOWED_CLIENT_SERIAL", "");
     const char *serial = env_or("CLOUDTSE_TSE_SERIAL", CLOUDTSE_DEFAULT_TSE_SERIAL);
     const char *fcc = env_or("CLOUDTSE_FCC_VERSION", CLOUDTSE_DEFAULT_FCC_VERSION);
     const char *db = getenv("CLOUDTSE_DB_PATH");
@@ -59,6 +64,8 @@ void config_load(void) {
         g_config.port = CLOUDTSE_DEFAULT_PORT;
     }
     strncpy(g_config.eas_code, eas, sizeof(g_config.eas_code) - 1);
+    strncpy(g_config.allowed_client_serial, allowed_client,
+            sizeof(g_config.allowed_client_serial) - 1);
     strncpy(g_config.tse_serial, serial, sizeof(g_config.tse_serial) - 1);
     strncpy(g_config.fcc_version, fcc, sizeof(g_config.fcc_version) - 1);
     g_config.log_requests = !(log && strcmp(log, "0") == 0);
@@ -84,13 +91,8 @@ void config_load(void) {
         g_config.tse_mode = TSE_MODE_SIM;
     }
 
-    util_strlcpy(g_config.tse_device, env_or("CLOUDTSE_TSE_DEVICE", CLOUDTSE_DEFAULT_TSE_DEVICE),
-                 sizeof(g_config.tse_device));
+    g_config.tse_device[0] = '\0';
     g_config.worm_path[0] = '\0';
-    const char *worm_path = getenv("CLOUDTSE_WORM_PATH");
-    if (worm_path && worm_path[0]) {
-        util_strlcpy(g_config.worm_path, worm_path, sizeof(g_config.worm_path));
-    }
     util_strlcpy(g_config.worm_lib, env_or("CLOUDTSE_WORM_LIB", CLOUDTSE_DEFAULT_WORM_LIB),
                  sizeof(g_config.worm_lib));
     g_config.worm_admin_pin[0] = '\0';

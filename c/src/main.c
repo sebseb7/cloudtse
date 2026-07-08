@@ -81,7 +81,7 @@ int main(void) {
     log_info("TSE serial: %s", g_config.tse_serial);
     log_info("Database:   %s", g_config.db_path);
     if (g_config.tse_mode == TSE_MODE_HARDWARE) {
-        log_info("TSE mode:   hardware (%s)", g_config.tse_device);
+        log_info("TSE mode:   hardware (auto-detected removable device)");
         if (tse_worm_is_active()) {
             log_info("WormAPI:    %s", g_config.worm_lib);
         } else {

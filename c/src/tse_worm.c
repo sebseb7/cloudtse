@@ -7,6 +7,7 @@
 #include "util.h"
 
 #include <ctype.h>
+#include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
 #include <pthread.h>
@@ -71,6 +72,7 @@ typedef int (*worm_tse_setup_fn)(worm_handle store, const char *seed, int seed_l
                                   const char *admin_pin, int admin_pin_len,
                                   const char *time_admin_pin, int time_admin_pin_len,
                                   const char *client_id);
+typedef const char *(*worm_get_version_fn)(void);
 
 static bool g_legacy_api;
 static void *g_lib;
@@ -206,8 +208,11 @@ static worm_info_u64_fn p_worm_info_created_signatures;
 static worm_info_u64_fn p_worm_info_max_time_sync_delay;
 static worm_info_u64_fn p_worm_info_has_changed_time_admin_pin;
 static worm_info_u64_fn p_worm_info_init_state;
+static worm_info_u64_fn p_worm_info_hardware_version;
+static worm_info_u64_fn p_worm_info_firmware_version;
 static worm_tse_setup_fn p_worm_tse_setup;
 static worm_get_log_message_certificate_fn p_worm_get_log_message_certificate;
+static worm_get_version_fn p_worm_get_version;
 
 /*
  * In legacy/mounted mode (CLOUDTSE_WORM_PATH set to e.g. /mnt/tse), the
@@ -312,40 +317,116 @@ static int try_legacy_mount_paths(void) {
     return -1;
 }
 
+static bool is_block_dev_name(const char *name) {
+    char letter;
+    int n;
+    /* whole disk or partition of a SCSI/SATA/USB disk */
+    if (sscanf(name, "sd%c%d", &letter, &n) == 2 && letter >= 'a' && letter <= 'z')
+        return true;
+    if (sscanf(name, "sd%c", &letter) == 1 && letter >= 'a' && letter <= 'z')
+        return true;
+    /* SD/MMC cards (e.g. mmcblk0, mmcblk0p1) */
+    if (sscanf(name, "mmcblk%d", &n) == 1)
+        return true;
+    /* NVMe namespaces (e.g. nvme0n1, nvme0n1p1) */
+    if (strncmp(name, "nvme", 4) == 0)
+        return true;
+    return false;
+}
+
+/*
+ * A TSE is a removable USB/SD device. We decide this from sysfs metadata
+ * only — we never open a fixed system disk. /sys/block/<dev>/removable is
+ * "1" for hot-plugged storage (USB sticks, SD readers) and "0" for built-in
+ * disks/SSDs, so this excludes the boot disk without touching it.
+ */
+static bool sysfs_device_is_removable(const char *name) {
+    char path[512];
+    snprintf(path, sizeof(path), "/sys/block/%s/removable", name);
+    FILE *f = fopen(path, "r");
+    if (!f) {
+        return false;
+    }
+    char buf[8];
+    bool removable = false;
+    if (fgets(buf, sizeof(buf), f) && buf[0] == '1') {
+        removable = true;
+    }
+    fclose(f);
+    return removable;
+}
+
 static int ensure_block_open(void) {
     char err[256];
-    const char *primary = g_config.tse_device;
-    char fallback_buf[256];
-    const char *fallback = NULL;
 
     /*
-     * Accept either the whole disk (e.g. /dev/sdb) or its first partition
-     * (e.g. /dev/sdb1) and try the other as a fallback, for whichever
-     * drive letter the TSE USB stick happens to enumerate as this boot.
+     * The TSE is located by discovery, not guessing: enumerate /sys/block and
+     * consider only removable devices. Each such device is then confirmed to
+     * actually be a TSE via tse_block_probe (which validates the TSE offset
+     * table). Fixed system disks are never opened.
      */
-    size_t plen = strlen(primary);
-    if (plen > 0 && isdigit((unsigned char)primary[plen - 1])) {
-        util_strlcpy(fallback_buf, primary, sizeof(fallback_buf));
-        fallback_buf[plen - 1] = '\0';
-        fallback = fallback_buf;
-    } else if (plen + 2 <= sizeof(fallback_buf)) {
-        snprintf(fallback_buf, sizeof(fallback_buf), "%.*s1", (int)plen, primary);
-        fallback = fallback_buf;
+    char candidates[32][32];
+    int n = 0;
+
+    DIR *sys = opendir("/sys/block");
+    if (!sys) {
+        log_error("cannot enumerate /sys/block to locate the TSE device");
+        return -1;
+    }
+    struct dirent *ent;
+    while ((ent = readdir(sys)) != NULL &&
+           n < (int)(sizeof(candidates) / sizeof(candidates[0]))) {
+        if (!is_block_dev_name(ent->d_name)) {
+            continue;
+        }
+        if (!sysfs_device_is_removable(ent->d_name)) {
+            continue;
+        }
+        if (strlen(ent->d_name) + 6 > sizeof(candidates[n])) {
+            continue;
+        }
+        snprintf(candidates[n], sizeof(candidates[n]), "/dev/%s", ent->d_name);
+        n++;
+    }
+    closedir(sys);
+
+    for (int i = 0; i < n; i++) {
+        const char *dev = candidates[i];
+        char fallback_buf[32];
+        const char *fallback = NULL;
+        size_t dl = strlen(dev);
+        if (dl > 0 && isdigit((unsigned char)dev[dl - 1])) {
+            util_strlcpy(fallback_buf, dev, sizeof(fallback_buf));
+            fallback_buf[dl - 1] = '\0';
+            fallback = fallback_buf;
+        } else if (dl + 2 <= sizeof(fallback_buf)) {
+            snprintf(fallback_buf, sizeof(fallback_buf), "%.*s1", (int)dl, dev);
+            fallback = fallback_buf;
+        }
+
+        if (tse_block_probe(dev, err, sizeof(err)) == 0 &&
+            tse_block_open(&g_block, dev) == 0) {
+            util_strlcpy(g_config.tse_device, dev, sizeof(g_config.tse_device));
+            return 0;
+        }
+        log_debug("TSE probe %s failed: %s", dev, err);
+
+        if (fallback && tse_block_probe(fallback, err, sizeof(err)) == 0 &&
+            tse_block_open(&g_block, fallback) == 0) {
+            util_strlcpy(g_config.tse_device, fallback, sizeof(g_config.tse_device));
+            return 0;
+        }
+        if (fallback) {
+            log_debug("TSE probe %s failed: %s", fallback, err);
+        }
     }
 
-    if (tse_block_probe(primary, err, sizeof(err)) == 0 &&
-        tse_block_open(&g_block, primary) == 0) {
-        return 0;
-    }
-    if (fallback && tse_block_probe(fallback, err, sizeof(err)) == 0 &&
-        tse_block_open(&g_block, fallback) == 0) {
-        return 0;
-    }
-
-    if (fallback) {
-        log_error("TSE block open failed for %s and %s: %s", primary, fallback, err);
+    if (n == 0) {
+        log_error("no removable TSE device found — insert the TSE USB/SD device "
+                  "(enumerated /sys/block, none were removable)");
     } else {
-        log_error("TSE block open failed for %s: %s", primary, err);
+        log_error("no TSE device among %d removable candidate(s); last error: %s",
+                  n, err);
     }
     return -1;
 }
@@ -376,7 +457,7 @@ static int open_store_with_block(void) {
     if (!g_store) {
         return -1;
     }
-    snprintf(g_store_path, sizeof(g_store_path), "block:%s", g_config.tse_device);
+    snprintf(g_store_path, sizeof(g_store_path), "block:%s", g_block.device);
     return 0;
 }
 
@@ -984,9 +1065,12 @@ int tse_worm_init(void) {
     p_worm_info_has_changed_time_admin_pin =
         resolve(g_lib, "worm_info_hasChangedTimeAdminPin", NULL);
     p_worm_info_init_state = resolve(g_lib, "worm_info_initializationState", NULL);
+    p_worm_info_hardware_version = resolve(g_lib, "worm_info_hardwareVersion", NULL);
+    p_worm_info_firmware_version = resolve(g_lib, "worm_info_firmwareVersion", NULL);
     p_worm_tse_setup = resolve(g_lib, "worm_tse_setup", NULL);
     p_worm_get_log_message_certificate =
         resolve(g_lib, "worm_getLogMessageCertificate", NULL);
+    p_worm_get_version = resolve(g_lib, "worm_getVersion", NULL);
 
     int opened = -1;
     if (g_legacy_api) {
@@ -1013,16 +1097,15 @@ int tse_worm_init(void) {
             opened = open_store(g_config.worm_path);
         }
         if (opened != 0) {
-            opened = open_store(g_config.tse_device);
+            opened = open_store(g_block.device);
         }
         if (opened != 0) {
             opened = open_store_with_block();
         }
     }
     if (opened != 0) {
-        log_error("worm init failed. For legacy libWormAPI set CLOUDTSE_WORM_PATH to the mounted "
-                  "TSE (e.g. /mnt/tse) or ensure %s is accessible.",
-                  g_config.tse_device);
+        log_error("worm init failed. The TSE was not found on any removable device — "
+                  "ensure the TSE USB/SD device is inserted and accessible.");
         dlclose(g_lib);
         g_lib = NULL;
         tse_block_close(&g_block);
@@ -1289,10 +1372,24 @@ void tse_worm_fill_info(tse_info_t *info) {
                 if (p_worm_info_created_signatures) {
                     info->signature_counter = (int64_t)p_worm_info_created_signatures(wi);
                 }
+                if (p_worm_info_hardware_version) {
+                    snprintf(info->hardware_version, sizeof(info->hardware_version), "%llu",
+                             (unsigned long long)p_worm_info_hardware_version(wi));
+                }
+                if (p_worm_info_firmware_version) {
+                    snprintf(info->firmware_version, sizeof(info->firmware_version), "%llu",
+                             (unsigned long long)p_worm_info_firmware_version(wi));
+                }
             }
             if (p_worm_info_free) {
                 p_worm_info_free(wi);
             }
+        }
+    }
+    if (p_worm_get_version) {
+        const char *v = p_worm_get_version();
+        if (v) {
+            util_strlcpy(info->worm_api_version, v, sizeof(info->worm_api_version));
         }
     }
 }

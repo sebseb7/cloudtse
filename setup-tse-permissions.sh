@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-time, permanent setup so the cloudtse hardware TSE (Swissbit TSE on a
-# HUAWEI SD_Storage USB stick, vendor:model 12d1:1436) is usable by a
-# non-root user (no more `sudo ./start.sh` needed for permissions).
+# Genesys Logic SD Card Reader / Writer USB stick, vendor:model 05e3:0749) is
+# usable by a non-root user (no more `sudo ./start.sh` needed for permissions).
 #
 # What this does:
 #   1. Unmounts any stacked/duplicate previous mounts at /mnt/tse.
@@ -27,8 +27,8 @@ fi
 
 MOUNT_UID="${MOUNT_UID:-1000}"
 MOUNT_GID="${MOUNT_GID:-1000}"
-VENDOR_ID="12d1"
-MODEL_ID="1436"
+VENDOR_ID="05e3"
+MODEL_ID="0749"
 RULES_FILE="/etc/udev/rules.d/99-cloudtse.rules"
 
 echo "==> Unmounting any stacked previous mounts at /mnt/tse..."

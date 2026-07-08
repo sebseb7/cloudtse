@@ -15,26 +15,6 @@ if [[ -f "$ROOT/.env" ]]; then
     done < "$ROOT/.env"
 fi
 
-# USB vendor:model of the TSE stick (see /etc/udev/rules.d/99-cloudtse.rules).
-# Used to find the device regardless of which /dev/sdX letter it enumerates
-# as this boot, instead of assuming a fixed letter.
-TSE_USB_VENDOR_ID="12d1"
-TSE_USB_MODEL_ID="1436"
-
-detect_tse_device() {
-    local dev vid mid
-    for dev in /dev/sd?; do
-        [[ -b "$dev" ]] || continue
-        vid="$(udevadm info --query=property --name="$dev" 2>/dev/null | sed -n 's/^ID_VENDOR_ID=//p')"
-        mid="$(udevadm info --query=property --name="$dev" 2>/dev/null | sed -n 's/^ID_MODEL_ID=//p')"
-        if [[ "$vid" == "$TSE_USB_VENDOR_ID" && "$mid" == "$TSE_USB_MODEL_ID" ]]; then
-            echo "$dev"
-            return 0
-        fi
-    done
-    return 1
-}
-
 detect_tse_mount() {
     local p
     for p in "${CLOUDTSE_WORM_PATH:-}" /mnt/tse /mnt/SWISSBIT; do
@@ -69,28 +49,8 @@ ensure_tse_mount() {
         return 0
     fi
 
-    if [[ "$(id -u)" -ne 0 ]]; then
-        return 1
-    fi
-
-    local part="${CLOUDTSE_TSE_DEVICE:-}"
-    if [[ -z "$part" ]]; then
-        part="$(detect_tse_device || true)"
-    fi
-    if [[ -n "$part" && -b "${part}1" ]]; then
-        part="${part}1"
-    fi
-    [[ -n "$part" && -b "$part" ]] || return 1
-
-    mkdir -p /mnt/tse
-    local mount_opts="uid=$owner_uid,gid=$owner_gid"
-    if mount -o "$mount_opts" "$part" /mnt/tse 2>/dev/null ||
-        mount -o "ro,$mount_opts" "$part" /mnt/tse 2>/dev/null; then
-        export CLOUDTSE_WORM_PATH=/mnt/tse
-        mount -o "remount,rw,$mount_opts" /mnt/tse 2>/dev/null || true
-        echo "cloudtse: mounted $part at /mnt/tse (uid=$owner_uid gid=$owner_gid)" >&2
-        return 0
-    fi
+    # No explicitly mounted TSE found. The daemon locates the TSE itself by
+    # discovery on removable devices; we do not guess or mount a system disk.
     return 1
 }
 
@@ -111,10 +71,6 @@ if [[ "$CLOUDTSE_TSE_MODE" != "sim" ]]; then
         exit 1
     fi
     export LD_LIBRARY_PATH="$(dirname "$CLOUDTSE_WORM_LIB")${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-    if [[ -z "${CLOUDTSE_TSE_DEVICE:-}" ]]; then
-        CLOUDTSE_TSE_DEVICE="$(detect_tse_device || echo /dev/sda)"
-    fi
-    export CLOUDTSE_TSE_DEVICE
 
     # TSE credentials (CLOUDTSE_WORM_ADMIN_PIN / _PUK / _TIME_ADMIN_PIN) are
     # loaded from .env above; they're permanent on the physical hardware
