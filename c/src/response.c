@@ -74,7 +74,7 @@ int response_tss_details_json(const char *serial, char *out, size_t outlen) {
     store_normalize_serial(serial, norm, sizeof(norm));
     const char *pubkey = tse_worm_is_active() ? tse_worm_public_key_hex() : norm;
     const char *real_cert = tse_worm_is_active() ? tse_worm_certificate_base64() : NULL;
-    const char *cert = real_cert ? real_cert : (tse_worm_is_active() ? "HARDWARE" : "SIMULATOR");
+    const char *cert = real_cert ? real_cert : (g_config.leaf_certificate[0] ? g_config.leaf_certificate : (tse_worm_is_active() ? "HARDWARE" : "SIMULATOR"));
     return snprintf(out, outlen,
                     "{\"serial\":\"%s\",\"timeFormat\":\"yyyy-MM-dd'T'HH:mm:ssX\","
                     "\"encoding\":\"UTF-8\",\"publicKey\":\"%s\","

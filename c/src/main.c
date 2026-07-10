@@ -82,15 +82,16 @@ int main(void) {
     log_info("EAS-Code:   %s", g_config.eas_code);
     log_info("TSE serial: %s", g_config.tse_serial);
     log_info("Database:   %s", g_config.db_path);
-    if (g_config.tse_mode == TSE_MODE_HARDWARE) {
+    if (tse_worm_is_active()) {
         log_info("TSE mode:   hardware (auto-detected removable device)");
-        if (tse_worm_is_active()) {
-            log_info("WormAPI:    %s", g_config.worm_lib);
-        } else {
-            log_info("WormAPI:    not loaded (simulator fallback)");
-        }
+        log_info("WormAPI:    %s", g_config.worm_lib);
     } else {
-        log_info("TSE mode:   simulator");
+        if (g_config.tse_mode == TSE_MODE_HARDWARE) {
+            log_info("TSE mode:   simulator (fallback from hardware)");
+            log_info("WormAPI:    not loaded");
+        } else {
+            log_info("TSE mode:   simulator");
+        }
     }
     log_info("IP           = one of the addresses above");
     log_info("Port         = %u", g_config.port);

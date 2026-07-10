@@ -39,6 +39,7 @@ typedef struct {
     char worm_admin_puk[128];
     char worm_time_admin_pin[128];
     char worm_credential_seed[64];
+    char leaf_certificate[6144];
 } cloudtse_config_t;
 
 extern cloudtse_config_t g_config;

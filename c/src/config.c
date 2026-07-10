@@ -114,4 +114,35 @@ void config_load(void) {
     util_strlcpy(g_config.worm_credential_seed,
                  env_or("CLOUDTSE_WORM_CREDENTIAL_SEED", CLOUDTSE_DEFAULT_WORM_CREDENTIAL_SEED),
                  sizeof(g_config.worm_credential_seed));
+
+    g_config.leaf_certificate[0] = '\0';
+    const char *leaf_env = getenv("CLOUDTSE_LEAF_CERTIFICATE");
+    if (leaf_env && leaf_env[0]) {
+        static char file_buf[8192];
+        const char *cert_src = leaf_env;
+        FILE *f = fopen(leaf_env, "r");
+        if (f) {
+            size_t n = fread(file_buf, 1, sizeof(file_buf) - 1, f);
+            file_buf[n] = '\0';
+            fclose(f);
+            cert_src = file_buf;
+        }
+        const char *p = strstr(cert_src, "-----BEGIN CERTIFICATE-----");
+        if (p) {
+            p += 27;
+        } else {
+            p = cert_src;
+        }
+        size_t idx = 0;
+        while (*p && idx < sizeof(g_config.leaf_certificate) - 1) {
+            if (strncmp(p, "-----END", 8) == 0) {
+                break;
+            }
+            if (*p >= 33 && *p <= 126) {
+                g_config.leaf_certificate[idx++] = *p;
+            }
+            p++;
+        }
+        g_config.leaf_certificate[idx] = '\0';
+    }
 }
