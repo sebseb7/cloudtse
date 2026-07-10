@@ -4,8 +4,6 @@ Development-only **BSI TR-03153 compatible cloud TSE** for POS integration testi
 
 ## Quick start
 
-### C (recommended — ~76 KB RSS vs ~50+ MB for Node)
-
 ```bash
 sudo apt install libsqlite3-dev   # once
 make -C c
@@ -27,15 +25,6 @@ sudo ./start.sh
 ```
 
 `start.sh` sets `LD_LIBRARY_PATH`, picks up `libWormAPI/libWormAPI.so`, and tries to mount the TSE partition at `/mnt/tse`. If mount init fails, the C code falls back to block I/O on `CLOUDTSE_TSE_DEVICE` (default `/dev/sda`).
-
-### Node.js
-
-```bash
-npm install
-npm start
-```
-
-Listens on `0.0.0.0:20001` by default. All requests are logged to stdout.
 
 ## POS client setup
 
@@ -105,16 +94,9 @@ State (clients, transactions, counters, OAuth tokens) is stored in SQLite.
 ```
 start.sh            # launcher (hardware by default, `sim` subcommand)
 libWormAPI/         # place libWormAPI.so here for hardware mode
-c/                  # C implementation (same API + SQLite DB)
+c/                  # C implementation (API + SQLite DB)
   Makefile
   src/              # handlers, HTTP server, SQLite store, WormAPI integration
-src/                # Node.js implementation
-  index.js          # entrypoint
-  server.js         # routing
-  handlers/tse.js   # OAuth + transaction handlers
-  tse-response.js   # TR-03153 response builders
-  tse-store.js      # business logic
-  db.js             # SQLite
 sources/            # decompiled reference client (not executed)
 ```
 
