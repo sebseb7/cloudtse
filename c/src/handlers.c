@@ -6,6 +6,7 @@
 #include "response.h"
 #include "store.h"
 #include "tse_worm.h"
+#include "tse_worker.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -160,6 +161,7 @@ static void handle_oauth(http_request_t *req, http_response_t *res) {
 
     if (g_config.allowed_client_serial[0] &&
         strcmp(client_serial, g_config.allowed_client_serial) != 0) {
+        log_warn("register: client '%s' is not authorized to register", client_serial);
         char json[256];
         response_error_json(401, "unauthorized", "Client is not authorized to register", json,
                             sizeof(json));
@@ -332,6 +334,14 @@ static void handle_health(http_response_t *res) {
  * (concatenation of decoded lines == the .tar). The cloud POS client already
  * parses this wire format, so this is a drop-in for the existing cloud TSE.
  */
+/* Job type for tse_worker_run: wraps tse_worm_export_prepare. */
+typedef struct { int rc; } export_prep_job_t;
+
+static void export_prepare_fn(void *arg) {
+    export_prep_job_t *j = arg;
+    j->rc = tse_worm_export_prepare();
+}
+
 typedef struct {
     int fd;
     int write_rc;
@@ -366,18 +376,32 @@ static int export_tar_chunk_cb(const unsigned char *chunk, size_t len, void *ctx
     return e->write_rc != 0 ? 1 : 0;
 }
 
+/* Job type for tse_worker_run: wraps the entire export_tar call. */
+typedef struct {
+    export_stream_ctx_t *ctx;
+    int                  rc;
+} export_tar_job_t;
+
+static void export_tar_fn(void *arg) {
+    export_tar_job_t *j = arg;
+    j->rc = tse_worm_export_tar(export_tar_chunk_cb, j->ctx);
+}
+
 static int export_stream_writer(int fd, void *ctx) {
     export_stream_ctx_t *e = ctx;
     e->fd = fd;
-    int rc = tse_worm_export_tar(export_tar_chunk_cb, e);
-    if (rc != 0) {
+
+    export_tar_job_t job = { .ctx = e, .rc = -1 };
+    tse_worker_run(export_tar_fn, &job);
+
+    if (job.rc != 0) {
         /*
          * Headers (200) have already been sent, so we can't change the status
          * code now. The connection will close on return; log the failure so
          * it's not silent. (tse_worm_export_prepare gates the common causes —
          * self-test / time — before we get here.)
          */
-        log_error("GET /export/transactions: worm_export_tar failed (error %d)", rc);
+        log_error("GET /export/transactions: worm_export_tar failed (error %d)", job.rc);
     } else {
         log_info("GET /export/transactions: export complete");
     }
@@ -395,7 +419,11 @@ static void handle_export_transactions(http_request_t *req, http_response_t *res
         set_json_response(res, 503, json);
         return;
     }
-    if (tse_worm_export_prepare() != 0) {
+
+    /* Run export_prepare on the worker thread so it doesn't block the server. */
+    export_prep_job_t epj = { .rc = -1 };
+    tse_worker_run(export_prepare_fn, &epj);
+    if (epj.rc != 0) {
         char json[512];
         response_error_json(503, "service_unavailable",
                             "TSE not ready for export (self-test or time sync failed)",
@@ -413,7 +441,7 @@ static void handle_export_transactions(http_request_t *req, http_response_t *res
     res->stream = true;
     util_strlcpy(res->stream_content_type, "text/plain; charset=utf-8",
                  sizeof(res->stream_content_type));
-    res->stream_fn = export_stream_writer;
+    res->stream_fn  = export_stream_writer;
     res->stream_ctx = ctx;
 }
 

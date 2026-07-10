@@ -5,6 +5,7 @@
 #include "network.h"
 #include "store.h"
 #include "tse_worm.h"
+#include "tse_worker.h"
 
 #include <pthread.h>
 #include <signal.h>
@@ -59,6 +60,7 @@ int main(void) {
         return 1;
     }
     store_init();
+    tse_worker_init();
 
     char public_ip[64] = {0};
     int have_public = (network_resolve_public_ip(public_ip, sizeof(public_ip)) == 0);
@@ -102,6 +104,7 @@ int main(void) {
     }
 
     int rc = http_serve(g_config.host, g_config.port, &g_running);
+    tse_worker_shutdown();
     store_shutdown();
     db_close();
     return rc == 0 ? 0 : 1;

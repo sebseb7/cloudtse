@@ -3,12 +3,70 @@
 #include "db.h"
 #include "log.h"
 #include "tse_worm.h"
+#include "tse_worker.h"
 #include "util.h"
 
 #include <sqlite3.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ── TSE worker job types ──────────────────────────────────────────────── */
+
+typedef struct {
+    const char *client_id;
+    int         rc;
+} reg_client_job_t;
+
+static void reg_client_fn(void *arg) {
+    reg_client_job_t *j = arg;
+    j->rc = tse_worm_register_client(j->client_id);
+}
+
+typedef struct {
+    const char      *client_id;
+    const char      *process_type;
+    const char      *process_data;
+    tse_transaction_t *out;
+    char             err[256];
+    int              rc;
+} start_tx_job_t;
+
+static void start_tx_fn(void *arg) {
+    start_tx_job_t *j = arg;
+    j->rc = tse_worm_start_transaction(j->client_id, j->process_type, j->process_data,
+                                        j->out, j->err, sizeof(j->err));
+}
+
+typedef struct {
+    const char      *client_id;
+    int64_t          transaction_number;
+    const char      *process_type;
+    const char      *process_data;
+    tse_transaction_t *out;
+    char            *err_code;
+    size_t           err_code_len;
+    char            *err_msg;
+    size_t           err_msg_len;
+    int              rc;
+} finish_tx_job_t;
+
+static void finish_tx_fn(void *arg) {
+    finish_tx_job_t *j = arg;
+    j->rc = tse_worm_finish_transaction(j->client_id, j->transaction_number,
+                                         j->process_type, j->process_data,
+                                         j->out, j->err_code, j->err_code_len,
+                                         j->err_msg, j->err_msg_len);
+}
+
+typedef struct {
+    tse_info_t *info;
+} fill_info_job_t;
+
+static void fill_info_fn(void *arg) {
+    fill_info_job_t *j = arg;
+    tse_worm_fill_info(j->info);
+}
 
 static char g_created_at[64];
 
@@ -92,7 +150,9 @@ void store_shutdown(void) {
 
 int store_register_client(const char *serial_number) {
     if (tse_worm_is_active()) {
-        return tse_worm_register_client(serial_number);
+        reg_client_job_t job = { .client_id = serial_number, .rc = -1 };
+        tse_worker_run(reg_client_fn, &job);
+        return job.rc;
     }
     char now[64];
     util_now_iso(now, sizeof(now));
@@ -186,10 +246,16 @@ int store_start_transaction(const char *client_id, const char *process_type,
                             const char *process_data, const char *external_tx_id,
                             tse_transaction_t *out) {
     if (tse_worm_is_active()) {
-        char err[256];
-        if (tse_worm_start_transaction(client_id, process_type, process_data, out, err,
-                                     sizeof(err)) != 0) {
-            log_error("%s", err);
+        start_tx_job_t job = {
+            .client_id    = client_id,
+            .process_type = process_type,
+            .process_data = process_data,
+            .out          = out,
+            .rc           = -1,
+        };
+        tse_worker_run(start_tx_fn, &job);
+        if (job.rc != 0) {
+            log_error("%s", job.err);
             return -1;
         }
         if (external_tx_id && external_tx_id[0]) {
@@ -253,13 +319,23 @@ int store_finish_transaction(const char *client_id, int64_t transaction_number,
                              tse_transaction_t *out, char *err_code, size_t err_code_len,
                              char *err_msg, size_t err_msg_len) {
     if (tse_worm_is_active()) {
-        int rc = tse_worm_finish_transaction(client_id, transaction_number, process_type,
-                                             process_data, out, err_code, err_code_len, err_msg,
-                                             err_msg_len);
-        if (rc == 0) {
+        finish_tx_job_t job = {
+            .client_id          = client_id,
+            .transaction_number = transaction_number,
+            .process_type       = process_type,
+            .process_data       = process_data,
+            .out                = out,
+            .err_code           = err_code,
+            .err_code_len       = err_code_len,
+            .err_msg            = err_msg,
+            .err_msg_len        = err_msg_len,
+            .rc                 = -1,
+        };
+        tse_worker_run(finish_tx_fn, &job);
+        if (job.rc == 0) {
             record_transaction_finished(transaction_number);
         }
-        return rc;
+        return job.rc;
     }
     (void)client_id;
     const char *get_sql = "SELECT transaction_number, client_id, external_transaction_id, "
@@ -331,7 +407,8 @@ int store_finish_transaction(const char *client_id, int64_t transaction_number,
 void store_info(tse_info_t *info) {
     memset(info, 0, sizeof(*info));
     if (tse_worm_is_active()) {
-        tse_worm_fill_info(info);
+        fill_info_job_t job = { .info = info };
+        tse_worker_run(fill_info_fn, &job);
         util_strlcpy(info->fcc_version, g_config.fcc_version, sizeof(info->fcc_version));
         util_strlcpy(info->db_path, g_config.tse_device, sizeof(info->db_path));
         info->initialized = true;

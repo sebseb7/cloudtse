@@ -9,6 +9,7 @@ SRCS = src/main.c \
        src/tse_block.c \
        src/tse_worm.c \
        src/tse_worm_director.c \
+       src/tse_worker.c \
        src/response.c \
        src/handlers.c \
        src/http.c \
