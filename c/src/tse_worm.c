@@ -68,10 +68,12 @@ typedef unsigned long long (*worm_info_u64_fn)(worm_handle info);
 typedef int (*worm_get_log_message_certificate_fn)(worm_handle store, unsigned char *out,
                                                     uint32_t *inout_len);
 typedef int (*worm_tse_setup_fn)(worm_handle store, const char *seed, int seed_len,
-                                  const char *admin_puk, int admin_puk_len,
-                                  const char *admin_pin, int admin_pin_len,
-                                  const char *time_admin_pin, int time_admin_pin_len,
-                                  const char *client_id);
+                                   const char *admin_puk, int admin_puk_len,
+                                   const char *admin_pin, int admin_pin_len,
+                                   const char *time_admin_pin, int time_admin_pin_len,
+                                   const char *client_id);
+typedef int (*worm_export_tar_cb_fn)(const unsigned char *data, size_t len, void *ctx);
+typedef int (*worm_export_tar_fn)(worm_handle store, worm_export_tar_cb_fn cb, void *ctx);
 typedef const char *(*worm_get_version_fn)(void);
 
 static bool g_legacy_api;
@@ -213,6 +215,7 @@ static worm_info_u64_fn p_worm_info_firmware_version;
 static worm_tse_setup_fn p_worm_tse_setup;
 static worm_get_log_message_certificate_fn p_worm_get_log_message_certificate;
 static worm_get_version_fn p_worm_get_version;
+static worm_export_tar_fn p_worm_export_tar;
 
 /*
  * In legacy/mounted mode (CLOUDTSE_WORM_PATH set to e.g. /mnt/tse), the
@@ -1071,6 +1074,7 @@ int tse_worm_init(void) {
     p_worm_get_log_message_certificate =
         resolve(g_lib, "worm_getLogMessageCertificate", NULL);
     p_worm_get_version = resolve(g_lib, "worm_getVersion", NULL);
+    p_worm_export_tar = resolve(g_lib, "worm_export_tar", NULL);
 
     int opened = -1;
     if (g_legacy_api) {
@@ -1392,4 +1396,46 @@ void tse_worm_fill_info(tse_info_t *info) {
             util_strlcpy(info->worm_api_version, v, sizeof(info->worm_api_version));
         }
     }
+}
+
+int tse_worm_export_prepare(void) {
+    if (!g_active || !p_worm_export_tar) {
+        return -1;
+    }
+    /*
+     * worm_export_tar itself requires the TSE to have passed self-test and to
+     * have valid time (the library returns WORM_ERROR_WRONG_STATE_NEEDS_SELF_TEST
+     * / WORM_ERROR_NO_TIME_SET otherwise). Do that gatekeeping up front, while we
+     * can still return a clean JSON error, instead of partway through a streamed
+     * response whose headers have already been sent.
+     */
+    pthread_mutex_lock(&g_worm_mu);
+    ensure_self_test_passed();
+    if (!worm_has_valid_time()) {
+        (void)perform_time_sync();
+    }
+    int ready = worm_has_passed_self_test() && worm_has_valid_time();
+    pthread_mutex_unlock(&g_worm_mu);
+    return ready ? 0 : -1;
+}
+
+int tse_worm_export_tar(tse_worm_export_cb cb, void *ctx) {
+    if (!g_active || !p_worm_export_tar) {
+        return -1;
+    }
+    pthread_mutex_lock(&g_worm_mu);
+    ensure_self_test_passed();
+    if (!worm_has_valid_time()) {
+        (void)perform_time_sync();
+    }
+    /*
+     * The export callback walks the whole TSE log and may take a while; hold
+     * the lock so no other thread mutates TSE state mid-export. The callback
+     * only writes to the socket (no TSE calls), so the TSE stays idle while it
+     * streams.
+     */
+    long long rc = WORM_HW_CALL("worm_export_tar",
+                                 p_worm_export_tar(g_store, cb, ctx));
+    pthread_mutex_unlock(&g_worm_mu);
+    return rc == WORM_ERROR_NOERROR ? 0 : -1;
 }

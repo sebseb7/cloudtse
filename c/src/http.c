@@ -48,7 +48,7 @@ static void configure_client_socket(int fd) {
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
 }
 
-static int write_all(int fd, const void *data, size_t len) {
+int http_write_all(int fd, const void *data, size_t len) {
     const char *p = data;
     size_t left = len;
 
@@ -452,7 +452,26 @@ void http_send_response(int client_fd, const http_response_t *res, int keep_aliv
                                       "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
                                       "Connection: %s\r\n\r\n",
                                       res->status, connection);
-        write_all(client_fd, header, header_len);
+        http_write_all(client_fd, header, header_len);
+        return;
+    }
+
+    if (res->stream) {
+        const char *ct = res->stream_content_type[0] ? res->stream_content_type
+                                                         : "text/plain; charset=utf-8";
+        header_len = (size_t)snprintf(
+            header, sizeof(header),
+            "HTTP/1.1 200 OK\r\n"
+            "Content-Type: %s\r\n"
+            "Access-Control-Allow-Origin: *\r\n"
+            "Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS\r\n"
+            "Access-Control-Allow-Headers: Content-Type, Authorization\r\n"
+            "Connection: close\r\n\r\n",
+            ct);
+        http_write_all(client_fd, header, header_len);
+        if (res->stream_fn) {
+            res->stream_fn(client_fd, res->stream_ctx);
+        }
         return;
     }
 
@@ -482,13 +501,13 @@ void http_send_response(int client_fd, const http_response_t *res, int keep_aliv
         if (res->body_len > 0) {
             memcpy(combined + header_len, res->body, res->body_len);
         }
-        write_all(client_fd, combined, total_len);
+        http_write_all(client_fd, combined, total_len);
         return;
     }
 
-    write_all(client_fd, header, header_len);
+    http_write_all(client_fd, header, header_len);
     if (res->body_len > 0) {
-        write_all(client_fd, res->body, res->body_len);
+        http_write_all(client_fd, res->body, res->body_len);
     }
 }
 

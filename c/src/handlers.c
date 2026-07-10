@@ -5,6 +5,7 @@
 #include "log.h"
 #include "response.h"
 #include "store.h"
+#include "tse_worm.h"
 #include "util.h"
 
 #include <stdio.h>
@@ -325,6 +326,97 @@ static void handle_health(http_response_t *res) {
     set_json_response(res, 200, json);
 }
 
+/*
+ * GET /export/transactions — stream the TSE's export tar as one Base64 line
+ * per raw TAR chunk, exactly as WormExportTarCallback.onNewData delivers it
+ * (concatenation of decoded lines == the .tar). The cloud POS client already
+ * parses this wire format, so this is a drop-in for the existing cloud TSE.
+ */
+typedef struct {
+    int fd;
+    int write_rc;
+} export_stream_ctx_t;
+
+static int export_tar_chunk_cb(const unsigned char *chunk, size_t len, void *ctx) {
+    export_stream_ctx_t *e = ctx;
+    if (e->write_rc != 0) {
+        return 1; /* abort: a previous write already failed */
+    }
+    /*
+     * Each chunk is a multiple of 512 bytes (see worm_export_tar); Base64 of
+     * len bytes needs ((len+2)/3)*4+1 chars. Chunks are bounded (<= 64 KiB),
+     * so this per-chunk allocation is small and short-lived.
+     */
+    size_t b64_cap = ((len + 2) / 3) * 4 + 1;
+    char *b64 = malloc(b64_cap);
+    if (!b64) {
+        e->write_rc = -1;
+        return 1;
+    }
+    if (util_base64_encode(chunk, len, b64, b64_cap) != 0) {
+        free(b64);
+        e->write_rc = -1;
+        return 1;
+    }
+    size_t line_len = strlen(b64);
+    if (http_write_all(e->fd, b64, line_len) != 0 || http_write_all(e->fd, "\n", 1) != 0) {
+        e->write_rc = -1;
+    }
+    free(b64);
+    return e->write_rc != 0 ? 1 : 0;
+}
+
+static int export_stream_writer(int fd, void *ctx) {
+    export_stream_ctx_t *e = ctx;
+    e->fd = fd;
+    int rc = tse_worm_export_tar(export_tar_chunk_cb, e);
+    if (rc != 0) {
+        /*
+         * Headers (200) have already been sent, so we can't change the status
+         * code now. The connection will close on return; log the failure so
+         * it's not silent. (tse_worm_export_prepare gates the common causes —
+         * self-test / time — before we get here.)
+         */
+        log_error("GET /export/transactions: worm_export_tar failed (error %d)", rc);
+    } else {
+        log_info("GET /export/transactions: export complete");
+    }
+    free(e);
+    return 0;
+}
+
+static void handle_export_transactions(http_request_t *req, http_response_t *res) {
+    if (validate_bearer(req, res) != 0) {
+        return;
+    }
+    if (!tse_worm_is_active()) {
+        char json[256];
+        response_error_json(503, "service_unavailable", "TSE not active", json, sizeof(json));
+        set_json_response(res, 503, json);
+        return;
+    }
+    if (tse_worm_export_prepare() != 0) {
+        char json[512];
+        response_error_json(503, "service_unavailable",
+                            "TSE not ready for export (self-test or time sync failed)",
+                            json, sizeof(json));
+        set_json_response(res, 503, json);
+        return;
+    }
+    export_stream_ctx_t *ctx = calloc(1, sizeof(*ctx));
+    if (!ctx) {
+        char json[256];
+        response_error_json(500, "internal_error", "out of memory", json, sizeof(json));
+        set_json_response(res, 500, json);
+        return;
+    }
+    res->stream = true;
+    util_strlcpy(res->stream_content_type, "text/plain; charset=utf-8",
+                 sizeof(res->stream_content_type));
+    res->stream_fn = export_stream_writer;
+    res->stream_ctx = ctx;
+}
+
 static int match_tx_finish(const char *path, char *tx_id, size_t tx_id_len) {
     if (strncmp(path, "/transaction/", 13) != 0) {
         return 0;
@@ -367,6 +459,8 @@ void handlers_route(http_request_t *req, http_response_t *res) {
             handle_info(req, res);
         } else if (strcmp(path, "/transactions") == 0) {
             handle_list_transactions(req, res);
+        } else if (strcmp(path, "/export/transactions") == 0) {
+            handle_export_transactions(req, res);
         } else if (strcmp(path, "/") == 0 || strcmp(path, "/health") == 0) {
             handle_health(res);
         } else {
