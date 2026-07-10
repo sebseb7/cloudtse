@@ -117,17 +117,24 @@ static int fetch_ip_from_host(const char *host, const char *path, char *out, siz
         return -1;
     }
 
-    if (flags >= 0) {
-        fcntl(fd, F_SETFL, flags);
-    }
     freeaddrinfo(res);
 
     char req[256];
     snprintf(req, sizeof(req), "GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path,
              host);
-    if (write(fd, req, strlen(req)) < 0) {
-        close(fd);
-        return -1;
+    size_t req_len = strlen(req);
+    size_t written = 0;
+    while (written < req_len) {
+        if (select_wait_fd(fd, 1, 3000) <= 0) {
+            close(fd);
+            return -1;
+        }
+        ssize_t n = write(fd, req + written, req_len - written);
+        if (n < 0) {
+            close(fd);
+            return -1;
+        }
+        written += (size_t)n;
     }
 
     char buf[512];
