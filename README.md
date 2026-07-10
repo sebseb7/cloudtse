@@ -86,8 +86,30 @@ On a brand-new/factory-reset TSE (`initializationState == UNINITIALIZED`), the s
 | `CLOUDTSE_PUBLIC_IP` | — | IP shown to clients when auto-detect fails |
 | `CLOUDTSE_DB_PATH` | `data/cloudtse.db` | SQLite persistence |
 | `CLOUDTSE_LOG` | `1` | Set `0` to disable request logging |
+| `CLOUDTSE_LEAF_CERTIFICATE` | `SIMULATOR` | Base64-encoded leaf certificate or path to a PEM certificate file (used in simulator mode) |
 
 State (clients, transactions, counters, OAuth tokens) is stored in SQLite.
+
+### Custom Leaf Certificate in Simulator Mode
+
+To test integration with client apps that display the TSE's leaf certificate, you can configure a self-signed ECDSA certificate. *Note: In simulator mode, this certificate is only used for display (e.g. at the `/tssdetails` endpoint) and is not used for signing transactions (transaction signatures in simulator mode remain mock/randomized values).*
+
+1. Generate the ECDSA private key using the `prime256v1`/`secp256r1` curve:
+   ```bash
+   openssl ecparam -name prime256v1 -genkey -noout -out leaf-key.pem
+   ```
+
+2. Generate the self-signed certificate:
+   ```bash
+   openssl req -new -x509 -key leaf-key.pem -out leaf-cert.pem -days 3650 -subj "/CN=TSE-Simulator-Self-Signed"
+   ```
+
+3. Configure it in your `.env` file using the path to the file:
+   ```env
+   CLOUDTSE_LEAF_CERTIFICATE=/home/seb/src/cloudtse/leaf-cert.pem
+   ```
+   *(Alternatively, you can copy the raw base64 content directly into `CLOUDTSE_LEAF_CERTIFICATE` without linebreaks or PEM headers).*
+
 
 ## Project layout
 
