@@ -1134,7 +1134,9 @@ int tse_worm_init(void) {
     }
     log_worm_diagnostics("startup");
 
-    if (g_serial[0]) {
+    if (g_config.tse_mode == TSE_MODE_SIM && g_config.tse_public_key_b64[0]) {
+        util_strlcpy(g_serial, g_config.tse_serial, sizeof(g_serial));
+    } else if (g_serial[0]) {
         util_strlcpy(g_config.tse_serial, g_serial, sizeof(g_config.tse_serial));
     }
 

@@ -134,12 +134,15 @@ void store_init(void) {
             log_warn("hardware TSE init failed — falling back to simulator");
         }
     }
+    
+    // Always sync the (potentially newly derived) tse_serial to the DB.
+    store_normalize_serial(g_config.tse_serial, buf, sizeof(buf));
+    db_set_setting("tse_serial", buf);
+
     if (db_get_setting("created_at", g_created_at, sizeof(g_created_at))) {
         return;
     }
     util_now_iso(g_created_at, sizeof(g_created_at));
-    store_normalize_serial(g_config.tse_serial, buf, sizeof(buf));
-    (void)buf;
 }
 
 void store_shutdown(void) {

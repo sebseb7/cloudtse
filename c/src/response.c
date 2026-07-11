@@ -72,7 +72,11 @@ int response_open_transactions_json(const tse_transaction_t *txs, size_t count, 
 int response_tss_details_json(const char *serial, char *out, size_t outlen) {
     char norm[128];
     store_normalize_serial(serial, norm, sizeof(norm));
-    const char *pubkey = tse_worm_is_active() ? tse_worm_public_key_hex() : norm;
+    
+    const char *pk_from_worm = tse_worm_is_active() ? tse_worm_public_key_hex() : norm;
+    // If we successfully derived the SPKI Base64, use it instead of the dummy serial fallback.
+    const char *pubkey = g_config.tse_public_key_b64[0] ? g_config.tse_public_key_b64 : pk_from_worm;
+    
     const char *real_cert = tse_worm_is_active() ? tse_worm_certificate_base64() : NULL;
     const char *cert = real_cert ? real_cert : (g_config.leaf_certificate[0] ? g_config.leaf_certificate : (tse_worm_is_active() ? "HARDWARE" : "SIMULATOR"));
     return snprintf(out, outlen,

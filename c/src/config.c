@@ -1,6 +1,7 @@
 #include "config.h"
 #include "util.h"
 
+#include <openssl/sha.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -116,6 +117,7 @@ void config_load(void) {
                  sizeof(g_config.worm_credential_seed));
 
     g_config.leaf_certificate[0] = '\0';
+    g_config.tse_public_key_b64[0] = '\0';
     const char *leaf_env = getenv("CLOUDTSE_LEAF_CERTIFICATE");
     if (leaf_env && leaf_env[0]) {
         static char file_buf[8192];
@@ -144,5 +146,35 @@ void config_load(void) {
             p++;
         }
         g_config.leaf_certificate[idx] = '\0';
+
+        char der[8192];
+        int der_len = util_base64_decode(g_config.leaf_certificate, der, sizeof(der));
+        if (der_len > 0) {
+            static const unsigned char p256_sig[] = {
+                0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07,
+                0x03, 0x42, 0x00, 0x04
+            };
+            for (int i = 0; i <= der_len - (int)sizeof(p256_sig) - 64; i++) {
+                if (memcmp(der + i, p256_sig, sizeof(p256_sig)) == 0) {
+                    int spki_start = i - 13;
+                    if (spki_start >= 0 && spki_start + 91 <= der_len) {
+                        util_base64_encode((const uint8_t *)der + spki_start, 91, g_config.tse_public_key_b64, sizeof(g_config.tse_public_key_b64));
+                        
+                        unsigned char hash[SHA256_DIGEST_LENGTH];
+                        SHA256((const unsigned char *)der + i + sizeof(p256_sig) - 1, 65, hash);
+                        
+                        char derived_serial[128];
+                        util_bytes_to_hex(hash, SHA256_DIGEST_LENGTH, derived_serial, sizeof(derived_serial));
+                        util_uppercase(derived_serial);
+                        
+                        // Override the dummy serial if it was the default
+                        if (strcmp(g_config.tse_serial, CLOUDTSE_DEFAULT_TSE_SERIAL) == 0) {
+                            util_strlcpy(g_config.tse_serial, derived_serial, sizeof(g_config.tse_serial));
+                        }
+                    }
+                    break;
+                }
+            }
+        }
     }
 }

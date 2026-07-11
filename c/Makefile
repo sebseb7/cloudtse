@@ -1,6 +1,6 @@
 CC      ?= gcc
 CFLAGS  ?= -Wall -Wextra -O2 -std=c11 -Iinclude -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -DLOG_USE_COLOR
-LDFLAGS ?= -lsqlite3 -ldl -lpthread
+LDFLAGS ?= -lsqlite3 -ldl -lpthread -lcrypto
 
 SRCS = src/main.c \
        src/config.c \
