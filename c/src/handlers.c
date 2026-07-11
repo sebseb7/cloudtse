@@ -13,59 +13,57 @@
 #include <stdlib.h>
 #include <string.h>
 
-static int is_transaction_path(const char *path) {
-    if (strcmp(path, "/transaction") == 0) {
-        return 1;
+static void log_query_params(const char *url_path) {
+    const char *q = strchr(url_path ? url_path : "", '?');
+    if (!q || !q[1]) {
+        return;
     }
-    if (strncmp(path, "/transaction/", 13) != 0) {
-        return 0;
-    }
-    const char *id = path + 13;
-    if (!id[0]) {
-        return 0;
-    }
-    for (const char *p = id; *p; p++) {
-        if (*p < '0' || *p > '9') {
-            return 0;
-        }
-    }
-    return 1;
-}
+    log_info("  query: %s", q + 1);
 
-static void log_field(const char *key, const char *value) {
-    if (value && value[0]) {
-        log_info("    %s: %s", key, value);
-    }
-}
-
-static void log_transaction_payload(const char *label, const http_request_t *req) {
-    char client_id[256];
-    char process_type[512];
-    char process_data[4096];
-    char external_id[256];
-    client_id[0] = '\0';
-    process_type[0] = '\0';
-    process_data[0] = '\0';
-    external_id[0] = '\0';
-
-    json_get_string(req->body, "clientId", client_id, sizeof(client_id));
-    json_get_string(req->body, "processType", process_type, sizeof(process_type));
-    json_get_string(req->body, "processData", process_data, sizeof(process_data));
-    json_get_string(req->body, "externalTransactionId", external_id, sizeof(external_id));
-
-    log_info("  %s:", label);
-    log_field("clientId", client_id);
-    log_field("processType", process_type);
-    log_field("externalTransactionId", external_id);
-    log_field("processData", process_data);
-
-    if (process_data[0]) {
-        char decoded[4096];
-        if (util_base64_decode(process_data, decoded, sizeof(decoded)) > 0) {
-            log_info("    processData (decoded): %s", decoded);
+    char buf[512];
+    util_strlcpy(buf, q + 1, sizeof(buf));
+    char *save = NULL;
+    for (char *pair = strtok_r(buf, "&", &save); pair; pair = strtok_r(NULL, "&", &save)) {
+        char *eq = strchr(pair, '=');
+        if (eq) {
+            *eq = '\0';
+            log_info("    %s: %s", pair, eq + 1);
         } else {
-            log_info("    processData (decoded): [not base64 UTF-8]");
+            log_info("    %s:", pair);
         }
+    }
+}
+
+static void log_form_body(const char *body) {
+    char buf[HTTP_MAX_BODY];
+    if (!body || !body[0]) {
+        return;
+    }
+    util_strlcpy(buf, body, sizeof(buf));
+
+    char *save = NULL;
+    for (char *pair = strtok_r(buf, "&", &save); pair; pair = strtok_r(NULL, "&", &save)) {
+        char *eq = strchr(pair, '=');
+        if (eq) {
+            *eq = '\0';
+            log_info("    %s: %s", pair, eq + 1);
+        } else {
+            log_info("    %s:", pair);
+        }
+    }
+}
+
+static void log_json_body_extras(const char *body) {
+    char process_data[4096];
+    if (json_get_string(body, "processData", process_data, sizeof(process_data)) != 0 ||
+        !process_data[0]) {
+        return;
+    }
+    char decoded[4096];
+    if (util_base64_decode(process_data, decoded, sizeof(decoded)) > 0) {
+        log_info("    processData (decoded): %s", decoded);
+    } else {
+        log_info("    processData (decoded): [not base64 UTF-8]");
     }
 }
 
@@ -73,17 +71,26 @@ static void log_request(const http_request_t *req, const char *path) {
     if (!g_config.log_requests) {
         return;
     }
-    log_info("%s %s", req->method, path);
-    const char *auth = http_get_header(req, "Authorization");
-    if (auth) {
-        log_info("  authorization: %s", auth);
+    (void)path;
+    log_info("%s %s", req->method, req->path);
+    log_query_params(req->path);
+
+    for (int i = 0; i < req->header_count; i++) {
+        log_info("  %s: %s", req->headers[i].name, req->headers[i].value);
     }
-    if (req->body_len > 0) {
-        if (is_transaction_path(path)) {
-            log_transaction_payload("transaction payload", req);
-        } else {
-            log_info("  body: %s", req->body);
-        }
+
+    if (req->body_len == 0) {
+        return;
+    }
+
+    const char *ct = http_get_header(req, "Content-Type");
+    log_info("  body (%zu bytes): %s", req->body_len, req->body);
+
+    if (ct && strstr(ct, "application/x-www-form-urlencoded")) {
+        log_info("  form fields:");
+        log_form_body(req->body);
+    } else if (req->body[0] == '{') {
+        log_json_body_extras(req->body);
     }
 }
 

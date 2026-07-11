@@ -5,7 +5,44 @@
 #include "util.h"
 
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
+
+static const char *algorithm_for_public_key(const char *pubkey) {
+    if (!pubkey || !pubkey[0]) {
+        return "ecdsa-plain-SHA256";
+    }
+
+    uint8_t raw[256];
+    char buf[512];
+    size_t raw_len = 0;
+    if (util_is_hex_serial(pubkey)) {
+        size_t hex_len = strlen(pubkey);
+        if (hex_len % 2 == 0 && hex_len / 2 <= sizeof(raw)) {
+            for (size_t i = 0; i < hex_len / 2; i++) {
+                unsigned int byte = 0;
+                if (sscanf(pubkey + i * 2, "%2x", &byte) == 1) {
+                    raw[i] = (uint8_t)byte;
+                }
+            }
+            raw_len = hex_len / 2;
+        }
+    } else {
+        int n = util_base64_decode(pubkey, buf, sizeof(buf));
+        if (n > 0) {
+            raw_len = (size_t)n;
+            memcpy(raw, buf, raw_len);
+        }
+    }
+
+    if (raw_len == 97) {
+        return "ecdsa-plain-SHA384";
+    }
+    if (raw_len == 133) {
+        return "ecdsa-plain-SHA512";
+    }
+    return "ecdsa-plain-SHA256";
+}
 
 int response_start_transaction_json(const tse_transaction_t *tx, char *out, size_t outlen) {
     char log_time[64];
@@ -23,9 +60,13 @@ int response_finish_transaction_json(const tse_transaction_t *tx, char *out, siz
     char log_time[64];
     const char *iso = tx->time_end[0] ? tx->time_end : tx->time_start;
     util_fcc_log_time(iso, log_time, sizeof(log_time));
+    char esc_ptype[1024];
+    json_escape(tx->process_type, esc_ptype, sizeof(esc_ptype));
     return snprintf(out, outlen,
-                    "{\"signatureCounter\":\"%lld\",\"signatureValue\":\"%s\",\"logTime\":\"%s\"}",
-                    (long long)tx->signature_counter, tx->signature_value, log_time) < (int)outlen
+                    "{\"signatureCounter\":\"%lld\",\"signatureValue\":\"%s\",\"logTime\":\"%s\","
+                    "\"processType\":\"%s\"}",
+                    (long long)tx->signature_counter, tx->signature_value, log_time,
+                    esc_ptype) < (int)outlen
                ? 0
                : -1;
 }
@@ -73,17 +114,28 @@ int response_tss_details_json(const char *serial, char *out, size_t outlen) {
     char norm[128];
     store_normalize_serial(serial, norm, sizeof(norm));
     
-    const char *pk_from_worm = tse_worm_is_active() ? tse_worm_public_key_hex() : norm;
-    // If we successfully derived the SPKI Base64, use it instead of the dummy serial fallback.
-    const char *pubkey = g_config.tse_public_key_b64[0] ? g_config.tse_public_key_b64 : pk_from_worm;
+    // The publicKey field must always be Base64 of the raw EC point (0x04 || X || Y,
+    // or compressed 0x02/0x03 || X) -- never hex. Prefer the real hardware-reported
+    // key (Base64) when available; only fall back to a configured custom leaf cert's
+    // derived key, then finally the hex/serial placeholder as a last resort.
+    const char *worm_pubkey_b64 = tse_worm_is_active() ? tse_worm_public_key_b64() : NULL;
+    const char *pubkey = worm_pubkey_b64 ? worm_pubkey_b64
+                        : g_config.tse_public_key_b64[0] ? g_config.tse_public_key_b64
+                        : (tse_worm_is_active() ? tse_worm_public_key_hex() : norm);
     
     const char *real_cert = tse_worm_is_active() ? tse_worm_certificate_base64() : NULL;
     const char *cert = real_cert ? real_cert : (g_config.leaf_certificate[0] ? g_config.leaf_certificate : (tse_worm_is_active() ? "HARDWARE" : "SIMULATOR"));
+    const char *time_format = "yyyy-MM-dd'T'HH:mm:ssX";
+    const char *signing_time_format = tse_worm_is_active() ? tse_worm_log_time_format()
+                                                           : "utcTime";
+    const char *algorithm = algorithm_for_public_key(pubkey);
     return snprintf(out, outlen,
-                    "{\"serial\":\"%s\",\"timeFormat\":\"yyyy-MM-dd'T'HH:mm:ssX\","
+                    "{\"serial\":\"%s\",\"timeFormat\":\"%s\","
                     "\"encoding\":\"UTF-8\",\"publicKey\":\"%s\","
-                    "\"algorithm\":\"ecdsa-plain-SHA256\",\"leafCertificate\":\"%s\"}",
-                    norm, pubkey, cert) < (int)outlen
+                    "\"algorithm\":\"%s\",\"signingTimeFormat\":\"%s\","
+                    "\"leafCertificate\":\"%s\"}",
+                    norm, time_format, pubkey, algorithm, signing_time_format,
+                    cert) < (int)outlen
                ? 0
                : -1;
 }

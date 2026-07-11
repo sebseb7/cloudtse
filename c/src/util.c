@@ -26,7 +26,7 @@ void util_now_iso(char *buf, size_t buflen) {
 void util_fcc_log_time(const char *iso_string, char *buf, size_t buflen) {
     int y, mo, d, h, mi, s;
     if (sscanf(iso_string, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s) >= 6) {
-        snprintf(buf, buflen, "%04d-%02d-%02dT%02d:%02d:%02d", y, mo, d, h, mi, s);
+        snprintf(buf, buflen, "%04d-%02d-%02dT%02d:%02d:%02dZ", y, mo, d, h, mi, s);
         return;
     }
     time_t now = time(NULL);

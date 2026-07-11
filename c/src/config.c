@@ -158,7 +158,9 @@ void config_load(void) {
                 if (memcmp(der + i, p256_sig, sizeof(p256_sig)) == 0) {
                     int spki_start = i - 13;
                     if (spki_start >= 0 && spki_start + 91 <= der_len) {
-                        util_base64_encode((const uint8_t *)der + spki_start, 91, g_config.tse_public_key_b64, sizeof(g_config.tse_public_key_b64));
+                        util_base64_encode((const uint8_t *)der + i + sizeof(p256_sig) - 1, 65,
+                                           g_config.tse_public_key_b64,
+                                           sizeof(g_config.tse_public_key_b64));
                         
                         unsigned char hash[SHA256_DIGEST_LENGTH];
                         SHA256((const unsigned char *)der + i + sizeof(p256_sig) - 1, 65, hash);

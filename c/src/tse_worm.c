@@ -84,6 +84,7 @@ static worm_handle g_store;
 static tse_block_t g_block;
 static char g_serial[128];
 static char g_public_key_hex[256];
+static char g_public_key_b64[256];
 static char g_certificate_base64[6144];
 static char g_store_path[512];
 
@@ -168,7 +169,18 @@ static void worm_safe_client_id(const char *client_id, char *out, size_t outlen)
              client_id, len, WORM_CLIENT_ID_MAX_LEN, out);
 }
 
+/*
+ * DSFinV-K process type for the TSE is always set by the cloud TSE, not the client.
+ * Receipt start/finish uses Kassenbeleg-V1. "Beleg" only appears inside processData
+ * as the Vorgangstyp (Beleg^<umsätze>^<zahlungen>), not as the TSE process type.
+ */
+static const char *worm_tse_process_type(void) {
+    return "Kassenbeleg-V1";
+}
+
+typedef char *(*worm_log_time_format_fn)(void);
 static worm_store_new_fn p_worm_store_new;
+static worm_log_time_format_fn p_worm_log_time_format;
 static worm_store_free_fn p_worm_store_free;
 static worm_init_fn p_worm_init;
 static worm_cleanup_fn p_worm_cleanup;
@@ -516,12 +528,14 @@ static void refresh_info_fields(void) {
             p_worm_info_pubkey_out(info, &pk, &size);
             if (pk && size > 0) {
                 util_bytes_to_hex(pk, (size_t)size, g_public_key_hex, sizeof(g_public_key_hex));
+                util_base64_encode(pk, (size_t)size, g_public_key_b64, sizeof(g_public_key_b64));
             }
         } else if (p_worm_info_pubkey) {
             int size = 0;
             const unsigned char *pk = p_worm_info_pubkey(info, &size);
             if (pk && size > 0) {
                 util_bytes_to_hex(pk, (size_t)size, g_public_key_hex, sizeof(g_public_key_hex));
+                util_base64_encode(pk, (size_t)size, g_public_key_b64, sizeof(g_public_key_b64));
             }
         }
     }
@@ -957,8 +971,22 @@ const char *tse_worm_public_key_hex(void) {
     return g_public_key_hex[0] ? g_public_key_hex : g_config.tse_serial;
 }
 
+const char *tse_worm_public_key_b64(void) {
+    return g_public_key_b64[0] ? g_public_key_b64 : NULL;
+}
+
 const char *tse_worm_certificate_base64(void) {
     return g_certificate_base64[0] ? g_certificate_base64 : NULL;
+}
+
+const char *tse_worm_log_time_format(void) {
+    if (p_worm_log_time_format) {
+        const char *fmt = p_worm_log_time_format();
+        if (fmt && fmt[0]) {
+            return fmt;
+        }
+    }
+    return "unixTime";
 }
 
 int tse_worm_init(void) {
@@ -1075,6 +1103,7 @@ int tse_worm_init(void) {
         resolve(g_lib, "worm_getLogMessageCertificate", NULL);
     p_worm_get_version = resolve(g_lib, "worm_getVersion", NULL);
     p_worm_export_tar = resolve(g_lib, "worm_export_tar", NULL);
+    p_worm_log_time_format = resolve(g_lib, "worm_logTimeFormat", NULL);
 
     int opened = -1;
     if (g_legacy_api) {
@@ -1242,6 +1271,7 @@ int tse_worm_start_transaction(const char *client_id, const char *process_type,
     ensure_client_registered(client_id);
     char safe_id[40];
     worm_safe_client_id(client_id, safe_id, sizeof(safe_id));
+    (void)process_type;
 
     pthread_mutex_lock(&g_worm_mu);
     if (!worm_has_valid_time()) {
@@ -1254,7 +1284,7 @@ int tse_worm_start_transaction(const char *client_id, const char *process_type,
         return -1;
     }
 
-    const char *ptype = (process_type && process_type[0]) ? process_type : "Kassenbeleg";
+    const char *ptype = worm_tse_process_type();
     /*
      * Some WormAPI builds validate process_data as a real (non-NULL)
      * pointer even when its length is 0 and reject NULL with
@@ -1291,6 +1321,7 @@ int tse_worm_finish_transaction(const char *client_id, int64_t transaction_numbe
 
     char safe_id[40];
     worm_safe_client_id(client_id, safe_id, sizeof(safe_id));
+    (void)process_type;
 
     pthread_mutex_lock(&g_worm_mu);
     /*
@@ -1311,7 +1342,7 @@ int tse_worm_finish_transaction(const char *client_id, int64_t transaction_numbe
         return -1;
     }
 
-    const char *ptype = (process_type && process_type[0]) ? process_type : "Kassenbeleg";
+    const char *ptype = worm_tse_process_type();
     /* See tse_worm_start_transaction: pass a valid empty buffer, never NULL. */
     const unsigned char *pdata = (const unsigned char *)"";
     unsigned int pdlen = 0;
