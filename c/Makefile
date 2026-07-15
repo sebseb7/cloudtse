@@ -1,5 +1,7 @@
 CC      ?= gcc
 CFLAGS  ?= -Wall -Wextra -O2 -std=c11 -Iinclude -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -DLOG_USE_COLOR
+# Auto-generate header deps so config.h (etc.) changes rebuild every .o that includes them.
+CFLAGS  += -MMD -MP
 LDFLAGS ?= -lsqlite3 -ldl -lpthread -lcrypto
 
 SRCS = src/main.c \
@@ -19,6 +21,7 @@ SRCS = src/main.c \
        src/log.c
 
 OBJS = $(SRCS:.c=.o)
+DEPS = $(OBJS:.o=.d)
 TARGET = cloudtse
 
 .PHONY: all clean
@@ -32,4 +35,6 @@ src/%.o: src/%.c
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 clean:
-	rm -f $(OBJS) $(TARGET)
+	rm -f $(OBJS) $(DEPS) $(TARGET)
+
+-include $(DEPS)

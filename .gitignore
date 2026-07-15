@@ -2,5 +2,6 @@ data/
 sources/
 c/cloudtse
 c/src/*.o
+c/src/*.d
 libWormAPI/
 .env
