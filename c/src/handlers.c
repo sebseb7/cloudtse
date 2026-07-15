@@ -75,10 +75,6 @@ static void log_request(const http_request_t *req, const char *path) {
     log_info("%s %s", req->method, req->path);
     log_query_params(req->path);
 
-    for (int i = 0; i < req->header_count; i++) {
-        log_info("  %s: %s", req->headers[i].name, req->headers[i].value);
-    }
-
     if (req->body_len == 0) {
         return;
     }
@@ -166,8 +162,7 @@ static void handle_oauth(http_request_t *req, http_response_t *res) {
 
     const char *client_serial = client_id[0] ? client_id : "unknown";
 
-    if (g_config.allowed_client_serial[0] &&
-        strcmp(client_serial, g_config.allowed_client_serial) != 0) {
+    if (!config_is_client_allowed(client_serial)) {
         log_warn("register: client '%s' is not authorized to register", client_serial);
         char json[256];
         response_error_json(401, "unauthorized", "Client is not authorized to register", json,

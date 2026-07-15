@@ -26,7 +26,8 @@ typedef struct {
     uint16_t port;
     char public_ip[64];
     char eas_code[128];
-    char allowed_client_serial[256];
+    /* Comma-separated client_id allowlist. Empty = open self-registration. */
+    char allowed_client_serial[1024];
     char tse_serial[128];
     char fcc_version[64];
     char db_path[512];
@@ -46,5 +47,7 @@ typedef struct {
 extern cloudtse_config_t g_config;
 
 void config_load(void);
+/* 1 if allowlist is empty or client_serial is listed (comma-separated). */
+int config_is_client_allowed(const char *client_serial);
 
 #endif

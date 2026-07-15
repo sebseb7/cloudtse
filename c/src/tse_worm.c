@@ -1222,9 +1222,6 @@ int tse_worm_register_client(const char *client_id) {
     }
     int rc = (int)WORM_HW_CALL("worm_tse_registerClient",
                                 p_worm_register_client(g_store, safe_id));
-    if (rc == WORM_ERROR_NOERROR && p_worm_run_self_test) {
-        (void)WORM_HW_CALL("worm_tse_runSelfTest", p_worm_run_self_test(g_store, safe_id));
-    }
     if (logged_in) {
         worm_user_logout_call(WORM_USER_ADMIN);
     }

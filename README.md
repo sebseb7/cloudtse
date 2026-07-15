@@ -4,10 +4,20 @@ Development-only **BSI TR-03153 compatible cloud TSE** for POS integration testi
 
 ## Quick start
 
+**Build** (Debian/Ubuntu):
+
 ```bash
-sudo apt install libsqlite3-dev   # once
+sudo apt install build-essential libsqlite3-dev libssl-dev   # once
 make -C c
 ```
+
+| Package | Why |
+|---------|-----|
+| `build-essential` | `gcc`, `make` |
+| `libsqlite3-dev` | SQLite headers (`sqlite3.h`) |
+| `libssl-dev` | OpenSSL headers (`openssl/sha.h`) and `libcrypto` |
+
+On other distros, install the equivalent `-dev` packages for SQLite 3 and OpenSSL.
 
 **Simulator** (no hardware — default when running the binary directly):
 
@@ -74,6 +84,7 @@ On a brand-new/factory-reset TSE (`initializationState == UNINITIALIZED`), the s
 | `CLOUDTSE_PORT` | `20001` | Listen port |
 | `CLOUDTSE_HOST` | `0.0.0.0` | Bind address |
 | `CLOUDTSE_EAS_CODE` | `12345678` | Expected EAS code (`*` = accept any) |
+| `CLOUDTSE_ALLOWED_CLIENT_SERIAL` | — (open) | Comma-separated `client_id` allowlist for `POST /oauth/token`. Empty/unset = any client with a valid EAS code may register |
 | `CLOUDTSE_TSE_SERIAL` | 64-char hex | TSE serial in sim mode (`serial` / `serialNumber`) |
 | `CLOUDTSE_TSE_MODE` | `sim` (`hardware` via `start.sh`) | `sim`, `hardware`, `hw`, or `1` |
 | `CLOUDTSE_WORM_LIB` | `libWormAPI/libWormAPI.so` | Path to WormAPI shared library |

@@ -50,8 +50,9 @@ void config_load(void) {
     const char *eas = env_or("CLOUDTSE_EAS_CODE", CLOUDTSE_DEFAULT_EAS_CODE);
     /* No compiled-in default on purpose: this must come from .env (loaded
      * into the environment by start.sh) so it stays out of version control
-     * and matches whichever client was actually provisioned. Empty/unset
-     * means open self-registration (any client_id + correct EAS code). */
+     * and matches whichever clients were actually provisioned. Value is a
+     * comma-separated list of client_id serials. Empty/unset means open
+     * self-registration (any client_id + correct EAS code). */
     const char *allowed_client = env_or("CLOUDTSE_ALLOWED_CLIENT_SERIAL", "");
     const char *serial = env_or("CLOUDTSE_TSE_SERIAL", CLOUDTSE_DEFAULT_TSE_SERIAL);
     const char *fcc = env_or("CLOUDTSE_FCC_VERSION", CLOUDTSE_DEFAULT_FCC_VERSION);
@@ -179,4 +180,38 @@ void config_load(void) {
             }
         }
     }
+}
+
+int config_is_client_allowed(const char *client_serial) {
+    const char *list = g_config.allowed_client_serial;
+    if (!list[0]) {
+        return 1; /* empty allowlist => open registration */
+    }
+    if (!client_serial || !client_serial[0]) {
+        return 0;
+    }
+
+    size_t want_len = strlen(client_serial);
+    const char *p = list;
+    while (*p) {
+        while (*p == ' ' || *p == '\t') {
+            p++;
+        }
+        const char *start = p;
+        while (*p && *p != ',') {
+            p++;
+        }
+        const char *end = p;
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) {
+            end--;
+        }
+        size_t len = (size_t)(end - start);
+        if (len == want_len && memcmp(start, client_serial, len) == 0) {
+            return 1;
+        }
+        if (*p == ',') {
+            p++;
+        }
+    }
+    return 0;
 }
