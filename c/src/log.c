@@ -19,10 +19,11 @@
  * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
  * IN THE SOFTWARE.
  *
- * Vendored from https://github.com/rxi/log.c, with one deliberate change:
- * the default console callback writes to stdout instead of stderr, so it
- * shares the same unbuffered stream main() configures via
- * setvbuf(stdout, NULL, _IONBF, 0) and shows up immediately under pm2/etc.
+ * Vendored from https://github.com/rxi/log.c, with deliberate changes:
+ * - console callback writes to stdout instead of stderr (shares the unbuffered
+ *   stream main() configures via setvbuf, so output shows up immediately under
+ *   pm2/etc.)
+ * - source file:line is omitted from the prefix for cleaner operational logs
  */
 
 #include "log.h"
@@ -39,6 +40,7 @@ static struct {
     void *udata;
     log_LockFn lock;
     int level;
+    int indent;
     bool quiet;
     Callback callbacks[MAX_CALLBACKS];
 } L;
@@ -50,15 +52,22 @@ static const char *level_colors[] = {"\x1b[94m", "\x1b[36m", "\x1b[32m",
                                       "\x1b[33m", "\x1b[31m", "\x1b[35m"};
 #endif
 
+static void write_indent(FILE *f) {
+    for (int i = 0; i < L.indent; i++) {
+        fputc(' ', f);
+    }
+}
+
 static void stdout_callback(log_Event *ev) {
     char buf[16];
     buf[strftime(buf, sizeof(buf), "%H:%M:%S", ev->time)] = '\0';
 #ifdef LOG_USE_COLOR
-    fprintf(ev->udata, "%s %s%-5s\x1b[0m \x1b[90m%s:%d:\x1b[0m ", buf, level_colors[ev->level],
-            level_strings[ev->level], ev->file, ev->line);
+    fprintf(ev->udata, "%s %s%-5s\x1b[0m ", buf, level_colors[ev->level],
+            level_strings[ev->level]);
 #else
-    fprintf(ev->udata, "%s %-5s %s:%d: ", buf, level_strings[ev->level], ev->file, ev->line);
+    fprintf(ev->udata, "%s %-5s ", buf, level_strings[ev->level]);
 #endif
+    write_indent(ev->udata);
     vfprintf(ev->udata, ev->fmt, ev->ap);
     fprintf(ev->udata, "\n");
     fflush(ev->udata);
@@ -67,7 +76,8 @@ static void stdout_callback(log_Event *ev) {
 static void file_callback(log_Event *ev) {
     char buf[64];
     buf[strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", ev->time)] = '\0';
-    fprintf(ev->udata, "%s %-5s %s:%d: ", buf, level_strings[ev->level], ev->file, ev->line);
+    fprintf(ev->udata, "%s %-5s ", buf, level_strings[ev->level]);
+    write_indent(ev->udata);
     vfprintf(ev->udata, ev->fmt, ev->ap);
     fprintf(ev->udata, "\n");
     fflush(ev->udata);
@@ -100,6 +110,18 @@ void log_set_level(int level) {
 
 void log_set_quiet(bool enable) {
     L.quiet = enable;
+}
+
+void log_set_indent(int spaces) {
+    if (spaces < 0) {
+        spaces = 0;
+    }
+    if (spaces > 32) {
+        spaces = 32;
+    }
+    lock();
+    L.indent = spaces;
+    unlock();
 }
 
 int log_add_callback(log_LogFn fn, void *udata, int level) {

@@ -18,7 +18,7 @@ static void log_query_params(const char *url_path) {
     if (!q || !q[1]) {
         return;
     }
-    log_info("  query: %s", q + 1);
+    log_info("query: %s", q + 1);
 
     char buf[512];
     util_strlcpy(buf, q + 1, sizeof(buf));
@@ -27,9 +27,9 @@ static void log_query_params(const char *url_path) {
         char *eq = strchr(pair, '=');
         if (eq) {
             *eq = '\0';
-            log_info("    %s: %s", pair, eq + 1);
+            log_info("  %s: %s", pair, eq + 1);
         } else {
-            log_info("    %s:", pair);
+            log_info("  %s:", pair);
         }
     }
 }
@@ -46,9 +46,9 @@ static void log_form_body(const char *body) {
         char *eq = strchr(pair, '=');
         if (eq) {
             *eq = '\0';
-            log_info("    %s: %s", pair, eq + 1);
+            log_info("  %s: %s", pair, eq + 1);
         } else {
-            log_info("    %s:", pair);
+            log_info("  %s:", pair);
         }
     }
 }
@@ -61,9 +61,9 @@ static void log_json_body_extras(const char *body) {
     }
     char decoded[4096];
     if (util_base64_decode(process_data, decoded, sizeof(decoded)) > 0) {
-        log_info("    processData (decoded): %s", decoded);
+        log_info("processData (decoded): %s", decoded);
     } else {
-        log_info("    processData (decoded): [not base64 UTF-8]");
+        log_info("processData (decoded): [not base64 UTF-8]");
     }
 }
 
@@ -72,7 +72,10 @@ static void log_request(const http_request_t *req, const char *path) {
         return;
     }
     (void)path;
-    log_info("%s %s", req->method, req->path);
+    /* Unindented banner so each HTTP exchange is visually distinct. */
+    log_set_indent(0);
+    log_info("── %s %s", req->method, req->path);
+    log_set_indent(2);
     log_query_params(req->path);
 
     if (req->body_len == 0) {
@@ -80,10 +83,10 @@ static void log_request(const http_request_t *req, const char *path) {
     }
 
     const char *ct = http_get_header(req, "Content-Type");
-    log_info("  body (%zu bytes): %s", req->body_len, req->body);
+    log_info("body (%zu bytes): %s", req->body_len, req->body);
 
     if (ct && strstr(ct, "application/x-www-form-urlencoded")) {
-        log_info("  form fields:");
+        log_info("form fields:");
         log_form_body(req->body);
     } else if (req->body[0] == '{') {
         log_json_body_extras(req->body);
@@ -92,10 +95,12 @@ static void log_request(const http_request_t *req, const char *path) {
 
 static void log_response(int status, const char *body) {
     if (!g_config.log_requests) {
+        log_set_indent(0);
         return;
     }
     if (!body || !body[0]) {
-        log_info("  → %d", status);
+        log_info("→ %d", status);
+        log_set_indent(0);
         return;
     }
     char buf[HTTP_MAX_BODY];
@@ -110,7 +115,8 @@ static void log_response(int status, const char *body) {
             memmove(p + 11, end + 1, strlen(end + 1) + 1);
         }
     }
-    log_info("  → %d %s", status, buf);
+    log_info("→ %d %s", status, buf);
+    log_set_indent(0);
 }
 
 static void set_json_response(http_response_t *res, int status, const char *json) {
@@ -531,5 +537,7 @@ void handlers_route(http_request_t *req, http_response_t *res) {
 
     if (!res->no_body) {
         log_response(res->status, res->body);
+    } else {
+        log_set_indent(0);
     }
 }

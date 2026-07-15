@@ -43,6 +43,8 @@ const char *log_level_string(int level);
 void log_set_lock(log_LockFn fn, void *udata);
 void log_set_level(int level);
 void log_set_quiet(bool enable);
+/* Indent subsequent log lines by this many spaces (e.g. nest HW calls under a request). */
+void log_set_indent(int spaces);
 int log_add_callback(log_LogFn fn, void *udata, int level);
 int log_add_fp(FILE *fp, int level);
 
