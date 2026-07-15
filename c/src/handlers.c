@@ -94,10 +94,23 @@ static void log_response(int status, const char *body) {
     if (!g_config.log_requests) {
         return;
     }
-    log_info("  → %d", status);
-    if (body && body[0]) {
-        log_info("%s", body);
+    if (!body || !body[0]) {
+        log_info("  → %d", status);
+        return;
     }
+    char buf[HTTP_MAX_BODY];
+    util_strlcpy(buf, body, sizeof(buf));
+    const char *key = "\"leafCertificate\":\"";
+    char *p = strstr(buf, key);
+    if (p) {
+        p += strlen(key);
+        char *end = strchr(p, '"');
+        if (end && (size_t)(end - p) > 10) {
+            p[10] = '"';
+            memmove(p + 11, end + 1, strlen(end + 1) + 1);
+        }
+    }
+    log_info("  → %d %s", status, buf);
 }
 
 static void set_json_response(http_response_t *res, int status, const char *json) {
