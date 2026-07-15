@@ -87,6 +87,8 @@ static char g_public_key_hex[256];
 static char g_public_key_b64[256];
 static char g_certificate_base64[6144];
 static char g_store_path[512];
+/* Wall-clock time of the last successful worm_tse_updateTime (0 = unknown). */
+static time_t g_last_time_sync;
 
 /*
  * The physical TSE persists client registrations independently of this
@@ -566,6 +568,10 @@ static void log_worm_diagnostics(const char *context) {
                  v ? "" : "  <- set CLOUDTSE_WORM_TIME_ADMIN_PIN and restart, or run "
                           "worm_tse_updateTime as TimeAdmin");
     }
+    if (p_worm_info_max_time_sync_delay) {
+        log_info("  maxTimeSynchronizationDelay: %llu s",
+                 p_worm_info_max_time_sync_delay(info));
+    }
     if (p_worm_info_has_passed_self_test) {
         unsigned long long v = p_worm_info_has_passed_self_test(info);
         log_info("  hasPassedSelfTest:   %s", v ? "yes" : "NO");
@@ -843,6 +849,8 @@ static bool perform_time_sync(void) {
         WORM_ERROR_NOERROR;
     if (!ok) {
         log_error("tse_updateTime failed");
+    } else {
+        g_last_time_sync = time(NULL);
     }
     worm_user_logout_call(WORM_USER_TIME_ADMIN);
     return ok;
@@ -853,31 +861,36 @@ static bool perform_time_sync(void) {
  * (worm_info_maxTimeSynchronizationDelay) after the last worm_tse_updateTime
  * call, after which every transaction start/finish fails with
  * WORM_ERROR_NO_TIME_SET until it is refreshed. A single sync at startup is
- * not enough for a long-running server, so keep checking periodically in
- * the background for as long as the process runs, at half the allowed
- * window for headroom. Each check is a cheap read-only info query; the
- * actual login+updateTime+logout resync (3 signed log messages, i.e. 3
- * signature-counter increments on the device) only runs when the clock has
- * actually gone invalid, not on every wakeup.
+ * not enough for a long-running server, so poll every 5 minutes: each check
+ * is a cheap read-only info query that logs hasValidTime and the delay
+ * window. The actual login+updateTime+logout resync (3 signed log messages,
+ * i.e. 3 signature-counter increments) runs proactively at half that window
+ * after our last successful sync — or immediately if the clock has already
+ * gone invalid.
  */
 static void *time_sync_thread_main(void *arg) {
+    const unsigned int check_interval_sec = 300; /* 5 minutes */
     (void)arg;
     for (;;) {
-        unsigned long long interval_sec = 300; /* conservative default: 5 min */
+        sleep(check_interval_sec);
 
         pthread_mutex_lock(&g_worm_mu);
         if (!g_active) {
             pthread_mutex_unlock(&g_worm_mu);
             return NULL;
         }
-        if (g_store && p_worm_info_new && p_worm_info_read && p_worm_info_max_time_sync_delay) {
+
+        bool valid = true;
+        unsigned long long max_delay = 0;
+        if (g_store && p_worm_info_new && p_worm_info_read) {
             worm_handle info = p_worm_info_new(g_store);
             if (info) {
                 if (WORM_HW_CALL("worm_info_read", p_worm_info_read(info)) == WORM_ERROR_NOERROR) {
-                    unsigned long long delay = p_worm_info_max_time_sync_delay(info);
-                    if (delay > 10) {
-                        /* resync at half the allowed window for headroom */
-                        interval_sec = delay / 2;
+                    if (p_worm_info_has_valid_time) {
+                        valid = p_worm_info_has_valid_time(info) != 0;
+                    }
+                    if (p_worm_info_max_time_sync_delay) {
+                        max_delay = p_worm_info_max_time_sync_delay(info);
                     }
                 }
                 if (p_worm_info_free) {
@@ -885,23 +898,40 @@ static void *time_sync_thread_main(void *arg) {
                 }
             }
         }
-        pthread_mutex_unlock(&g_worm_mu);
 
-        sleep((unsigned int)(interval_sec > 0 ? interval_sec : 300));
+        time_t now = time(NULL);
+        long since_sync = g_last_time_sync ? (long)(now - g_last_time_sync) : -1;
+        log_info("TSE time check: hasValidTime=%s maxTimeSynchronizationDelay=%llu s "
+                 "(last sync %lds ago)",
+                 valid ? "yes" : "NO", max_delay, since_sync);
 
-        pthread_mutex_lock(&g_worm_mu);
-        if (g_active) {
-            /*
-             * login + updateTime + logout are each their own signed log
-             * message on the TSE, so each burns 3 entries off the device's
-             * finite signature counter. Skip the round trip entirely when
-             * the clock is already valid instead of unconditionally
-             * resyncing every cycle.
-             */
-            if (!worm_has_valid_time()) {
-                (void)perform_time_sync();
+        bool need_sync = !valid;
+        if (!need_sync) {
+            if (g_last_time_sync == 0) {
+                /*
+                 * Clock is valid but we did not sync it ourselves (e.g. left
+                 * over from a previous process). Refresh once so we own the
+                 * window and can renew it before it expires.
+                 */
+                need_sync = true;
+            } else if (max_delay > 0) {
+                unsigned long long threshold = max_delay / 2;
+                if (threshold < 10) {
+                    threshold = 10;
+                }
+                if ((unsigned long long)(now - g_last_time_sync) >= threshold) {
+                    need_sync = true;
+                }
             }
         }
+
+        if (need_sync) {
+            log_info("TSE time sync: %s",
+                     valid ? "proactive refresh before window expires"
+                           : "clock invalid — refreshing now");
+            (void)perform_time_sync();
+        }
+
         pthread_mutex_unlock(&g_worm_mu);
         if (!g_active) {
             return NULL;
@@ -1155,8 +1185,8 @@ int tse_worm_init(void) {
      * TimeAdmin login + updateTime + logout round trip costs ~2x the USB
      * command latency (seen: ~400ms combined) even when nothing needs to
      * change, so skip it at startup if the clock is already valid — the
-     * background thread (time_sync_thread_main) will keep it that way and
-     * resync proactively well before it would expire.
+     * background thread (time_sync_thread_main) polls every 5 minutes and
+     * refreshes proactively at half maxTimeSynchronizationDelay.
      */
     if (!worm_has_valid_time()) {
         perform_time_sync();
