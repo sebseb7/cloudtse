@@ -988,6 +988,24 @@ static void *time_sync_thread_main(void *arg) {
     const unsigned int check_interval_sec = 300; /* 5 minutes */
     /* Renew self-test this far before timeUntilNextSelfTest hits 0. */
     const unsigned long long self_test_renew_margin_sec = 3600;
+    /*
+     * YYYYMMDD of last CLOUDTSE_SELF_TEST_AT run (0 = never). If we start
+     * after today's slot, mark today done so a mid-day restart does not
+     * immediately force a catch-up self-test.
+     */
+    int last_scheduled_self_test_day = 0;
+    if (g_config.self_test_at_hour >= 0) {
+        time_t t0 = time(NULL);
+        struct tm tm0;
+        localtime_r(&t0, &tm0);
+        bool past_slot = tm0.tm_hour > g_config.self_test_at_hour ||
+                         (tm0.tm_hour == g_config.self_test_at_hour &&
+                          tm0.tm_min >= g_config.self_test_at_minute);
+        if (past_slot) {
+            last_scheduled_self_test_day =
+                (tm0.tm_year + 1900) * 10000 + (tm0.tm_mon + 1) * 100 + tm0.tm_mday;
+        }
+    }
     (void)arg;
     for (;;) {
         sleep(check_interval_sec);
@@ -1041,18 +1059,43 @@ static void *time_sync_thread_main(void *arg) {
                      self_test_ok ? "yes" : "NO");
         }
 
-        bool need_self_test = !self_test_ok;
+        bool scheduled_self_test = false;
+        if (g_config.self_test_at_hour >= 0) {
+            struct tm local_tm;
+            localtime_r(&now, &local_tm);
+            int today = (local_tm.tm_year + 1900) * 10000 + (local_tm.tm_mon + 1) * 100 +
+                        local_tm.tm_mday;
+            bool past_todays_slot =
+                local_tm.tm_hour > g_config.self_test_at_hour ||
+                (local_tm.tm_hour == g_config.self_test_at_hour &&
+                 local_tm.tm_min >= g_config.self_test_at_minute);
+            if (past_todays_slot && last_scheduled_self_test_day != today) {
+                scheduled_self_test = true;
+                last_scheduled_self_test_day = today;
+            }
+        }
+
+        bool need_self_test = !self_test_ok || scheduled_self_test;
         /* Epson openPos renews when timeUntilNextSelfTest == 0; also renew early. */
         if (!need_self_test && have_until_self_test &&
             until_self_test <= self_test_renew_margin_sec) {
             need_self_test = true;
         }
         if (need_self_test) {
-            log_info("TSE self-test: %s",
-                     self_test_ok ? "proactive renew before interval expires"
-                                  : "hasPassedSelfTest=NO — running now");
+            if (scheduled_self_test) {
+                log_info("TSE self-test: scheduled daily run at %02d:%02d (local)",
+                         g_config.self_test_at_hour, g_config.self_test_at_minute);
+            } else {
+                log_info("TSE self-test: %s",
+                         self_test_ok ? "proactive renew before interval expires"
+                                      : "hasPassedSelfTest=NO — running now");
+            }
             /* force: info may still report passed while the interval is nearly up */
             ensure_self_test_passed(true);
+            if (scheduled_self_test) {
+                /* Match Epson openPos: refresh clock after a planned self-test. */
+                (void)perform_time_sync();
+            }
         }
 
         bool need_sync = !valid;
@@ -1075,7 +1118,7 @@ static void *time_sync_thread_main(void *arg) {
             }
         }
 
-        if (need_sync) {
+        if (need_sync && !scheduled_self_test) {
             log_info("TSE time sync: %s",
                      valid ? "proactive refresh before window expires"
                            : "clock invalid — refreshing now");
@@ -1354,6 +1397,12 @@ int tse_worm_init(void) {
     g_active = true;
     start_time_sync_thread();
     log_info("TSE mode:   hardware");
+    if (g_config.self_test_at_hour >= 0) {
+        log_info("Self-test:  daily at %02d:%02d (local, CLOUDTSE_SELF_TEST_AT)",
+                 g_config.self_test_at_hour, g_config.self_test_at_minute);
+    } else {
+        log_info("Self-test:  on demand / expiry only (set CLOUDTSE_SELF_TEST_AT=HH:MM for daily)");
+    }
     if (g_block.offsets_valid) {
         log_info("TSE device: %s (info LBA %u)", g_block.device, g_block.lba_info);
     } else {

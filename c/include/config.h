@@ -42,6 +42,12 @@ typedef struct {
     char worm_credential_seed[64];
     char leaf_certificate[6144];
     char tse_public_key_b64[256];
+    /*
+     * Daily local-time self-test schedule from CLOUDTSE_SELF_TEST_AT (HH:MM).
+     * self_test_at_hour < 0 means disabled.
+     */
+    int self_test_at_hour;
+    int self_test_at_minute;
 } cloudtse_config_t;
 
 extern cloudtse_config_t g_config;

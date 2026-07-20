@@ -94,6 +94,7 @@ On a brand-new/factory-reset TSE (`initializationState == UNINITIALIZED`), the s
 | `CLOUDTSE_WORM_ADMIN_PUK` | auto-generated | TSE admin PUK (6 digits). Same auto-provisioning behavior as the admin PIN |
 | `CLOUDTSE_WORM_TIME_ADMIN_PIN` | auto-generated | TSE time-admin PIN (5 digits). Same auto-provisioning behavior as the admin PIN |
 | `CLOUDTSE_WORM_CREDENTIAL_SEED` | `SwissbitSwissbit` | Credential seed used to provision a brand-new/uninitialized TSE via `worm_tse_setup`. Only override if your TSE reseller issued a different seed |
+| `CLOUDTSE_SELF_TEST_AT` | — (off) | Daily self-test at local `HH:MM` (e.g. `06:00`). Also accepts `6` (= 06:00). `off` / empty disables the schedule; expiry / recovery self-tests still run |
 | `CLOUDTSE_PUBLIC_IP` | — | IP shown to clients when auto-detect fails |
 | `CLOUDTSE_DB_PATH` | `data/cloudtse.db` | SQLite persistence |
 | `CLOUDTSE_LOG` | `1` | Set `0` to disable request logging |

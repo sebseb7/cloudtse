@@ -44,6 +44,37 @@ static const char *env_or(const char *key, const char *fallback) {
     return (v && v[0]) ? v : fallback;
 }
 
+/* Parse CLOUDTSE_SELF_TEST_AT as HH:MM (local). Empty/off/disabled → hour=-1. */
+static void parse_self_test_at(const char *raw, int *hour_out, int *min_out) {
+    *hour_out = -1;
+    *min_out = 0;
+    if (!raw) {
+        return;
+    }
+    while (*raw == ' ' || *raw == '\t') {
+        raw++;
+    }
+    if (!raw[0] || strcmp(raw, "off") == 0 || strcmp(raw, "disabled") == 0 ||
+        strcmp(raw, "-") == 0) {
+        return;
+    }
+    int hour = 0;
+    int minute = 0;
+    const char *colon = strchr(raw, ':');
+    if (colon) {
+        hour = atoi(raw);
+        minute = atoi(colon + 1);
+    } else {
+        hour = atoi(raw);
+        minute = 0;
+    }
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59) {
+        return;
+    }
+    *hour_out = hour;
+    *min_out = minute;
+}
+
 void config_load(void) {
     const char *host = env_or("CLOUDTSE_HOST", CLOUDTSE_DEFAULT_HOST);
     const char *port_str = env_or("CLOUDTSE_PORT", "20001");
@@ -116,6 +147,9 @@ void config_load(void) {
     util_strlcpy(g_config.worm_credential_seed,
                  env_or("CLOUDTSE_WORM_CREDENTIAL_SEED", CLOUDTSE_DEFAULT_WORM_CREDENTIAL_SEED),
                  sizeof(g_config.worm_credential_seed));
+
+    parse_self_test_at(getenv("CLOUDTSE_SELF_TEST_AT"), &g_config.self_test_at_hour,
+                       &g_config.self_test_at_minute);
 
     g_config.leaf_certificate[0] = '\0';
     g_config.tse_public_key_b64[0] = '\0';
