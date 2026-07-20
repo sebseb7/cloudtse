@@ -18,10 +18,53 @@
 #include <time.h>
 #include <unistd.h>
 
+/* WormAPI error codes — full table in libWormAPI/WORM_ERRORS.md */
 #define WORM_ERROR_NOERROR 0
+#define WORM_ERROR_POWER_CYCLE_DETECTED 13
+#define WORM_ERROR_NO_TIME_SET 4098
+#define WORM_ERROR_TSE_INVALID_PARAMETER 4103
+#define WORM_ERROR_CLIENT_NOT_REGISTERED 4113
+#define WORM_ERROR_WRONG_STATE_NEEDS_SELF_TEST 4180
+#define WORM_ERROR_WRONG_STATE_NEEDS_SELF_TEST_PASSED 4181
+#define WORM_ERROR_AUTHENTICATION_FAILED 4352 /* 0x1100; login remaps 0x1100..0x11FF → this */
+#define WORM_ERROR_AUTHENTICATION_PIN_BLOCKED 4609
+#define WORM_ERROR_SIG_ERROR 65280
 #define WORM_USER_ADMIN 1
 #define WORM_USER_TIME_ADMIN 2
 #define WORM_INIT_UNINITIALIZED 0
+
+static bool worm_rc_needs_self_test(int rc) {
+    return rc == WORM_ERROR_WRONG_STATE_NEEDS_SELF_TEST ||
+           rc == WORM_ERROR_WRONG_STATE_NEEDS_SELF_TEST_PASSED ||
+           rc == WORM_ERROR_POWER_CYCLE_DETECTED || rc == WORM_ERROR_SIG_ERROR;
+}
+
+static const char *worm_error_name(int rc) {
+    switch (rc) {
+    case WORM_ERROR_NOERROR:
+        return "NOERROR";
+    case WORM_ERROR_POWER_CYCLE_DETECTED:
+        return "POWER_CYCLE_DETECTED";
+    case WORM_ERROR_NO_TIME_SET:
+        return "NO_TIME_SET";
+    case WORM_ERROR_TSE_INVALID_PARAMETER:
+        return "TSE_INVALID_PARAMETER";
+    case WORM_ERROR_CLIENT_NOT_REGISTERED:
+        return "CLIENT_NOT_REGISTERED";
+    case WORM_ERROR_WRONG_STATE_NEEDS_SELF_TEST:
+        return "WRONG_STATE_NEEDS_SELF_TEST";
+    case WORM_ERROR_WRONG_STATE_NEEDS_SELF_TEST_PASSED:
+        return "WRONG_STATE_NEEDS_SELF_TEST_PASSED";
+    case WORM_ERROR_AUTHENTICATION_FAILED:
+        return "AUTHENTICATION_FAILED";
+    case WORM_ERROR_AUTHENTICATION_PIN_BLOCKED:
+        return "AUTHENTICATION_PIN_BLOCKED";
+    case WORM_ERROR_SIG_ERROR:
+        return "SIG_ERROR";
+    default:
+        return NULL;
+    }
+}
 
 typedef intptr_t worm_handle;
 
@@ -215,6 +258,7 @@ static worm_tse_reader_writer_director_connect_fn p_worm_rw_director_connect;
 /* Optional diagnostic getters, resolved best-effort for troubleshooting. */
 static worm_info_u64_fn p_worm_info_has_valid_time;
 static worm_info_u64_fn p_worm_info_has_passed_self_test;
+static worm_info_u64_fn p_worm_info_time_until_next_self_test;
 static worm_info_u64_fn p_worm_info_registered_clients;
 static worm_info_u64_fn p_worm_info_max_registered_clients;
 static worm_info_u64_fn p_worm_info_is_tx_in_progress;
@@ -576,6 +620,10 @@ static void log_worm_diagnostics(const char *context) {
         unsigned long long v = p_worm_info_has_passed_self_test(info);
         log_info("  hasPassedSelfTest:   %s", v ? "yes" : "NO");
     }
+    if (p_worm_info_time_until_next_self_test) {
+        log_info("  timeUntilNextSelfTest: %llu s",
+                 p_worm_info_time_until_next_self_test(info));
+    }
     if (p_worm_info_has_changed_time_admin_pin) {
         unsigned long long v = p_worm_info_has_changed_time_admin_pin(info);
         log_info("  hasChangedTimeAdminPin: %s%s", v ? "yes" : "NO",
@@ -720,10 +768,9 @@ static void ensure_tse_provisioned(void) {
 
 /*
  * hasPassedSelfTest is hardware state read from the TSE's own info block,
- * not per-process session state. As long as the physical device wasn't
- * actually power-cycled (unplugged/replugged, or the host machine
- * rebooted), a self-test that passed in a previous run of this process is
- * still recorded on the TSE itself.
+ * not per-process session state. It clears after a physical power-cycle
+ * (unplug/replug, host reboot, USB suspend) and also after ~25 hours
+ * without a fresh worm_tse_runSelfTest (see worm_info_timeUntilNextSelfTest).
  */
 static bool worm_has_passed_self_test(void) {
     bool passed = false;
@@ -743,23 +790,26 @@ static bool worm_has_passed_self_test(void) {
 
 /*
  * The TSE requires a self-test to pass after every actual power-cycle of
- * the physical device before it will accept logins, registration state
- * changes, or transactions (WORM_ERROR_WRONG_STATE_NEEDS_SELF_TEST).
- * hasPassedSelfTest is hardware state, so if the TSE stayed powered across
- * a restart of this process, it's already satisfied and rerunning the
- * self-test is a needless HW round trip. The self test itself requires a
- * client ID that was *already* registered on this physical TSE in a
- * previous session (registering a new client is one of the few operations
- * allowed even before self-test passes). We remember the last client ID
- * that worked in the local DB so restarts keep working without operator
- * input; if none is known yet (very first boot after provisioning) we
- * register one and retry.
+ * the physical device, and at least once every ~25 hours, before it will
+ * accept logins, registration state changes, or transactions
+ * (WORM_ERROR_WRONG_STATE_NEEDS_SELF_TEST = 4180). hasPassedSelfTest is
+ * hardware state, so if the TSE stayed powered and the interval has not
+ * elapsed, it's already satisfied and rerunning the self-test is a
+ * needless HW round trip. Pass force=true to run anyway (e.g. after a
+ * 4180 on login when the info block may still look stale).
+ *
+ * The self test itself requires a client ID that was *already* registered
+ * on this physical TSE in a previous session (registering a new client is
+ * one of the few operations allowed even before self-test passes). We
+ * remember the last client ID that worked in the local DB so restarts keep
+ * working without operator input; if none is known yet (very first boot
+ * after provisioning) we register one and retry.
  */
-static void ensure_self_test_passed(void) {
+static void ensure_self_test_passed(bool force) {
     if (!p_worm_run_self_test) {
         return;
     }
-    if (worm_has_passed_self_test()) {
+    if (!force && worm_has_passed_self_test()) {
         return;
     }
 
@@ -835,20 +885,59 @@ static bool perform_time_sync(void) {
     if (!p_worm_user_login || !p_worm_update_time || !p_worm_user_logout) {
         return worm_has_valid_time();
     }
+
+    /* Login/updateTime require a current self-test; renew first if needed. */
+    ensure_self_test_passed(false);
+
     int login_rc = worm_user_login_call(WORM_USER_TIME_ADMIN, g_config.worm_time_admin_pin);
+    if (worm_rc_needs_self_test(login_rc)) {
+        log_warn("TimeAdmin login returned %s (%d) — forcing self-test and retrying",
+                 worm_error_name(login_rc) ? worm_error_name(login_rc) : "?", login_rc);
+        ensure_self_test_passed(true);
+        login_rc = worm_user_login_call(WORM_USER_TIME_ADMIN, g_config.worm_time_admin_pin);
+    }
     if (login_rc != WORM_ERROR_NOERROR) {
-        log_warn("TimeAdmin login failed (error %d) — check CLOUDTSE_WORM_TIME_ADMIN_PIN. Note: "
-                 "3 consecutive wrong PIN attempts lock the TimeAdmin role until unblocked with "
-                 "the TimeAdmin PUK.",
-                 login_rc);
+        const char *name = worm_error_name(login_rc);
+        if (worm_rc_needs_self_test(login_rc)) {
+            log_warn("TimeAdmin login failed (%s / %d): TSE still requires a successful "
+                     "self-test (not a PIN problem)",
+                     name ? name : "?", login_rc);
+        } else if (login_rc == WORM_ERROR_AUTHENTICATION_PIN_BLOCKED) {
+            log_warn("TimeAdmin login failed (AUTHENTICATION_PIN_BLOCKED / %d) — TimeAdmin PIN "
+                     "is locked. Unblock with the TimeAdmin PUK; do not keep retrying login.",
+                     login_rc);
+        } else if (login_rc == WORM_ERROR_AUTHENTICATION_FAILED) {
+            log_warn("TimeAdmin login failed (AUTHENTICATION_FAILED / %d) — check "
+                     "CLOUDTSE_WORM_TIME_ADMIN_PIN. Note: 3 consecutive wrong PIN attempts lock "
+                     "the TimeAdmin role until unblocked with the TimeAdmin PUK.",
+                     login_rc);
+        } else {
+            log_warn("TimeAdmin login failed (%s%s%d)", name ? name : "", name ? " / " : "",
+                     login_rc);
+        }
         return false;
     }
     unsigned long long now = (unsigned long long)time(NULL);
-    bool ok =
-        WORM_HW_CALL("worm_tse_updateTime", p_worm_update_time(g_store, now)) ==
-        WORM_ERROR_NOERROR;
+    int update_rc =
+        (int)WORM_HW_CALL("worm_tse_updateTime", p_worm_update_time(g_store, now));
+    if (worm_rc_needs_self_test(update_rc)) {
+        log_warn("tse_updateTime returned %s (%d) — forcing self-test and retrying",
+                 worm_error_name(update_rc) ? worm_error_name(update_rc) : "?", update_rc);
+        worm_user_logout_call(WORM_USER_TIME_ADMIN);
+        ensure_self_test_passed(true);
+        login_rc = worm_user_login_call(WORM_USER_TIME_ADMIN, g_config.worm_time_admin_pin);
+        if (login_rc != WORM_ERROR_NOERROR) {
+            log_warn("TimeAdmin re-login after updateTime self-test failed (error %d)", login_rc);
+            return false;
+        }
+        now = (unsigned long long)time(NULL);
+        update_rc = (int)WORM_HW_CALL("worm_tse_updateTime", p_worm_update_time(g_store, now));
+    }
+    bool ok = update_rc == WORM_ERROR_NOERROR;
     if (!ok) {
-        log_error("tse_updateTime failed");
+        log_error("tse_updateTime failed (error %d%s%s)", update_rc,
+                  worm_error_name(update_rc) ? " " : "",
+                  worm_error_name(update_rc) ? worm_error_name(update_rc) : "");
     } else {
         g_last_time_sync = time(NULL);
     }
@@ -857,19 +946,48 @@ static bool perform_time_sync(void) {
 }
 
 /*
+ * Epson/JTL Epos2Manager recovery (see libWormAPI/WORM_ERRORS.md):
+ *   NEEDS_SELF_TEST → runSelfTest, then fall through to time sync
+ *   NO_TIME_SET / unauthenticated TimeAdmin → TimeAdmin login + updateTime
+ * Returns true if recovery was attempted (caller should retry the failed op once).
+ * Must be called with g_worm_mu held.
+ */
+static bool recover_after_worm_error(int rc) {
+    if (worm_rc_needs_self_test(rc)) {
+        log_warn("TSE op returned %s (%d) — self-test then time sync (Epson-style recovery)",
+                 worm_error_name(rc) ? worm_error_name(rc) : "?", rc);
+        ensure_self_test_passed(true);
+        (void)perform_time_sync();
+        return true;
+    }
+    if (rc == WORM_ERROR_NO_TIME_SET) {
+        log_warn("TSE op returned NO_TIME_SET (%d) — refreshing clock", rc);
+        (void)perform_time_sync();
+        return true;
+    }
+    return false;
+}
+
+/*
  * The TSE only considers its clock "valid" for a limited window
  * (worm_info_maxTimeSynchronizationDelay) after the last worm_tse_updateTime
  * call, after which every transaction start/finish fails with
- * WORM_ERROR_NO_TIME_SET until it is refreshed. A single sync at startup is
- * not enough for a long-running server, so poll every 5 minutes: each check
- * is a cheap read-only info query that logs hasValidTime and the delay
- * window. The actual login+updateTime+logout resync (3 signed log messages,
- * i.e. 3 signature-counter increments) runs proactively at half that window
- * after our last successful sync — or immediately if the clock has already
- * gone invalid.
+ * WORM_ERROR_NO_TIME_SET until it is refreshed. Independently, self-test
+ * must be renewed at least every ~25 hours (and after any power cycle).
+ * A single sync/self-test at startup is not enough for a long-running
+ * server, so poll every 5 minutes: each check is a cheap read-only info
+ * query that logs hasValidTime / self-test remaining. The actual
+ * login+updateTime+logout resync (3 signed log messages, i.e. 3
+ * signature-counter increments) runs proactively at half that window
+ * after our last successful sync — or immediately if the clock has
+ * already gone invalid. Self-test is renewed when hasPassedSelfTest is
+ * false or timeUntilNextSelfTest is nearly expired (Epson renews at == 0
+ * on connect; we also renew within a 1 h margin).
  */
 static void *time_sync_thread_main(void *arg) {
     const unsigned int check_interval_sec = 300; /* 5 minutes */
+    /* Renew self-test this far before timeUntilNextSelfTest hits 0. */
+    const unsigned long long self_test_renew_margin_sec = 3600;
     (void)arg;
     for (;;) {
         sleep(check_interval_sec);
@@ -881,7 +999,10 @@ static void *time_sync_thread_main(void *arg) {
         }
 
         bool valid = true;
+        bool self_test_ok = true;
         unsigned long long max_delay = 0;
+        unsigned long long until_self_test = 0;
+        bool have_until_self_test = false;
         if (g_store && p_worm_info_new && p_worm_info_read) {
             worm_handle info = p_worm_info_new(g_store);
             if (info) {
@@ -889,8 +1010,15 @@ static void *time_sync_thread_main(void *arg) {
                     if (p_worm_info_has_valid_time) {
                         valid = p_worm_info_has_valid_time(info) != 0;
                     }
+                    if (p_worm_info_has_passed_self_test) {
+                        self_test_ok = p_worm_info_has_passed_self_test(info) != 0;
+                    }
                     if (p_worm_info_max_time_sync_delay) {
                         max_delay = p_worm_info_max_time_sync_delay(info);
+                    }
+                    if (p_worm_info_time_until_next_self_test) {
+                        until_self_test = p_worm_info_time_until_next_self_test(info);
+                        have_until_self_test = true;
                     }
                 }
                 if (p_worm_info_free) {
@@ -901,9 +1029,31 @@ static void *time_sync_thread_main(void *arg) {
 
         time_t now = time(NULL);
         long since_sync = g_last_time_sync ? (long)(now - g_last_time_sync) : -1;
-        log_info("TSE time check: hasValidTime=%s maxTimeSynchronizationDelay=%llu s "
-                 "(last sync %lds ago)",
-                 valid ? "yes" : "NO", max_delay, since_sync);
+        if (have_until_self_test) {
+            log_info("TSE time check: hasValidTime=%s maxTimeSynchronizationDelay=%llu s "
+                     "(last sync %lds ago); hasPassedSelfTest=%s timeUntilNextSelfTest=%llu s",
+                     valid ? "yes" : "NO", max_delay, since_sync,
+                     self_test_ok ? "yes" : "NO", until_self_test);
+        } else {
+            log_info("TSE time check: hasValidTime=%s maxTimeSynchronizationDelay=%llu s "
+                     "(last sync %lds ago); hasPassedSelfTest=%s",
+                     valid ? "yes" : "NO", max_delay, since_sync,
+                     self_test_ok ? "yes" : "NO");
+        }
+
+        bool need_self_test = !self_test_ok;
+        /* Epson openPos renews when timeUntilNextSelfTest == 0; also renew early. */
+        if (!need_self_test && have_until_self_test &&
+            until_self_test <= self_test_renew_margin_sec) {
+            need_self_test = true;
+        }
+        if (need_self_test) {
+            log_info("TSE self-test: %s",
+                     self_test_ok ? "proactive renew before interval expires"
+                                  : "hasPassedSelfTest=NO — running now");
+            /* force: info may still report passed while the interval is nearly up */
+            ensure_self_test_passed(true);
+        }
 
         bool need_sync = !valid;
         if (!need_sync) {
@@ -1114,6 +1264,8 @@ int tse_worm_init(void) {
 
     p_worm_info_has_valid_time = resolve(g_lib, "worm_info_hasValidTime", NULL);
     p_worm_info_has_passed_self_test = resolve(g_lib, "worm_info_hasPassedSelfTest", NULL);
+    p_worm_info_time_until_next_self_test =
+        resolve(g_lib, "worm_info_timeUntilNextSelfTest", NULL);
     p_worm_info_registered_clients = resolve(g_lib, "worm_info_registeredClients", NULL);
     p_worm_info_max_registered_clients = resolve(g_lib, "worm_info_maxRegisteredClients", NULL);
     p_worm_info_is_tx_in_progress = resolve(g_lib, "worm_info_isTransactionInProgress", NULL);
@@ -1178,7 +1330,7 @@ int tse_worm_init(void) {
     refresh_info_fields();
     refresh_certificate();
     ensure_tse_provisioned();
-    ensure_self_test_passed();
+    ensure_self_test_passed(false);
     /*
      * The TSE remembers whether it has valid time independently of this
      * process (it's fiscal state on the device, not in-memory). A
@@ -1301,6 +1453,9 @@ int tse_worm_start_transaction(const char *client_id, const char *process_type,
     (void)process_type;
 
     pthread_mutex_lock(&g_worm_mu);
+    if (!worm_has_passed_self_test()) {
+        ensure_self_test_passed(false);
+    }
     if (!worm_has_valid_time()) {
         (void)perform_time_sync();
     }
@@ -1320,11 +1475,24 @@ int tse_worm_start_transaction(const char *client_id, const char *process_type,
     int rc = (int)WORM_HW_CALL(
         "worm_transaction_start",
         p_worm_tx_start(g_store, safe_id, (const unsigned char *)"", 0, ptype, response));
+    if (rc != WORM_ERROR_NOERROR && recover_after_worm_error(rc)) {
+        p_worm_tx_resp_free(response);
+        response = p_worm_tx_resp_new(g_store);
+        if (!response) {
+            pthread_mutex_unlock(&g_worm_mu);
+            snprintf(err_msg, err_msg_len, "worm_transaction_response_new failed");
+            return -1;
+        }
+        rc = (int)WORM_HW_CALL(
+            "worm_transaction_start",
+            p_worm_tx_start(g_store, safe_id, (const unsigned char *)"", 0, ptype, response));
+    }
     if (rc != WORM_ERROR_NOERROR) {
         p_worm_tx_resp_free(response);
         log_worm_diagnostics("transaction_start failed");
         pthread_mutex_unlock(&g_worm_mu);
-        snprintf(err_msg, err_msg_len, "worm_transaction_start failed (error %d)", rc);
+        snprintf(err_msg, err_msg_len, "worm_transaction_start failed (error %d%s%s)", rc,
+                 worm_error_name(rc) ? " " : "", worm_error_name(rc) ? worm_error_name(rc) : "");
         return -1;
     }
 
@@ -1359,6 +1527,9 @@ int tse_worm_finish_transaction(const char *client_id, int64_t transaction_numbe
      * just letting worm_transaction_finish fail with
      * WORM_ERROR_NO_TIME_SET.
      */
+    if (!worm_has_passed_self_test()) {
+        ensure_self_test_passed(false);
+    }
     if (!worm_has_valid_time()) {
         (void)perform_time_sync();
     }
@@ -1389,12 +1560,26 @@ int tse_worm_finish_transaction(const char *client_id, int64_t transaction_numbe
         "worm_transaction_finish",
         p_worm_tx_finish(g_store, safe_id, (unsigned long long)transaction_number, pdata, pdlen,
                           ptype, response));
+    if (rc != WORM_ERROR_NOERROR && recover_after_worm_error(rc)) {
+        p_worm_tx_resp_free(response);
+        response = p_worm_tx_resp_new(g_store);
+        if (!response) {
+            pthread_mutex_unlock(&g_worm_mu);
+            snprintf(err_msg, err_msg_len, "worm_transaction_response_new failed");
+            return -1;
+        }
+        rc = (int)WORM_HW_CALL(
+            "worm_transaction_finish",
+            p_worm_tx_finish(g_store, safe_id, (unsigned long long)transaction_number, pdata,
+                              pdlen, ptype, response));
+    }
     if (rc != WORM_ERROR_NOERROR) {
         p_worm_tx_resp_free(response);
         log_worm_diagnostics("transaction_finish failed");
         pthread_mutex_unlock(&g_worm_mu);
         strncpy(err_code, "ErrorNoTransaction", err_code_len);
-        snprintf(err_msg, err_msg_len, "worm_transaction_finish failed (error %d)", rc);
+        snprintf(err_msg, err_msg_len, "worm_transaction_finish failed (error %d%s%s)", rc,
+                 worm_error_name(rc) ? " " : "", worm_error_name(rc) ? worm_error_name(rc) : "");
         return -1;
     }
 
@@ -1470,7 +1655,7 @@ int tse_worm_export_prepare(void) {
      * response whose headers have already been sent.
      */
     pthread_mutex_lock(&g_worm_mu);
-    ensure_self_test_passed();
+    ensure_self_test_passed(false);
     if (!worm_has_valid_time()) {
         (void)perform_time_sync();
     }
@@ -1484,7 +1669,7 @@ int tse_worm_export_tar(tse_worm_export_cb cb, void *ctx) {
         return -1;
     }
     pthread_mutex_lock(&g_worm_mu);
-    ensure_self_test_passed();
+    ensure_self_test_passed(false);
     if (!worm_has_valid_time()) {
         (void)perform_time_sync();
     }
