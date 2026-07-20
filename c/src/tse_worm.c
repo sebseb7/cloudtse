@@ -1398,10 +1398,10 @@ int tse_worm_init(void) {
     start_time_sync_thread();
     log_info("TSE mode:   hardware");
     if (g_config.self_test_at_hour >= 0) {
-        log_info("Self-test:  daily at %02d:%02d (local, CLOUDTSE_SELF_TEST_AT)",
+        log_info("Self-test:  daily at %02d:%02d (local) — schedule active",
                  g_config.self_test_at_hour, g_config.self_test_at_minute);
     } else {
-        log_info("Self-test:  on demand / expiry only (set CLOUDTSE_SELF_TEST_AT=HH:MM for daily)");
+        log_info("Self-test:  schedule off (set CLOUDTSE_SELF_TEST_AT=HH:MM)");
     }
     if (g_block.offsets_valid) {
         log_info("TSE device: %s (info LBA %u)", g_block.device, g_block.lba_info);

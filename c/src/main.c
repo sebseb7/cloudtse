@@ -82,6 +82,12 @@ int main(void) {
     log_info("EAS-Code:   %s", g_config.eas_code);
     log_info("TSE serial: %s", g_config.tse_serial);
     log_info("Database:   %s", g_config.db_path);
+    if (g_config.self_test_at_hour >= 0) {
+        log_info("Self-test:  daily at %02d:%02d (local) — schedule active",
+                 g_config.self_test_at_hour, g_config.self_test_at_minute);
+    } else {
+        log_info("Self-test:  schedule off (set CLOUDTSE_SELF_TEST_AT=HH:MM)");
+    }
     if (tse_worm_is_active()) {
         log_info("TSE mode:   hardware (auto-detected removable device)");
         log_info("WormAPI:    %s", g_config.worm_lib);
