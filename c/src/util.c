@@ -24,15 +24,29 @@ void util_now_iso(char *buf, size_t buflen) {
 }
 
 void util_fcc_log_time(const char *iso_string, char *buf, size_t buflen) {
+
     int y, mo, d, h, mi, s;
+    time_t t;
+    struct tm local;
+
     if (sscanf(iso_string, "%d-%d-%dT%d:%d:%d", &y, &mo, &d, &h, &mi, &s) >= 6) {
-        snprintf(buf, buflen, "%04d-%02d-%02dT%02d:%02d:%02dZ", y, mo, d, h, mi, s);
-        return;
+        struct tm utc = {0};
+        utc.tm_year = y - 1900;
+        utc.tm_mon = mo - 1;
+        utc.tm_mday = d;
+        utc.tm_hour = h;
+        utc.tm_min = mi;
+        utc.tm_sec = s;
+        t = timegm(&utc);
+    } else {
+        t = time(NULL);
     }
-    time_t now = time(NULL);
-    struct tm tm;
-    gmtime_r(&now, &tm);
-    strftime(buf, buflen, "%Y-%m-%dT%H:%M:%S", &tm);
+
+    if (localtime_r(&t, &local) == NULL) {
+        gmtime_r(&t, &local);
+    }
+    snprintf(buf, buflen, "%04d-%02d-%02dT%02d:%02d:%02dZ", local.tm_year + 1900,
+             local.tm_mon + 1, local.tm_mday, local.tm_hour, local.tm_min, local.tm_sec);
 }
 
 int util_random_bytes(uint8_t *buf, size_t len) {

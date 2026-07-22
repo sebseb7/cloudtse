@@ -6,6 +6,7 @@
 
 double util_monotonic_ms(void);
 void util_now_iso(char *buf, size_t buflen);
+/* Format logTime / startTime as YYYY-MM-DDThh:mm:ssZ with host-local digits. */
 void util_fcc_log_time(const char *iso_string, char *buf, size_t buflen);
 int util_random_bytes(uint8_t *buf, size_t len);
 int util_random_hex(char *out, size_t outlen, size_t nbytes);
